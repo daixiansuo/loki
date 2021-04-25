@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"reflect"
 	"time"
 
@@ -9,8 +10,6 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
-
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 )
 
 const (
@@ -76,7 +75,7 @@ func (s *tenantStage) Process(labels model.LabelSet, extracted map[string]interf
 		return
 	}
 
-	labels[client.ReservedLabelTenantID] = model.LabelValue(tenantID)
+	labels[loki.ReservedLabelTenantID] = model.LabelValue(tenantID)
 }
 
 // Name implements Stage

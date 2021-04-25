@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"io/ioutil"
 	"strconv"
 	"strings"
@@ -14,12 +15,10 @@ import (
 	"github.com/weaveworks/common/logging"
 
 	"github.com/grafana/loki/clients/pkg/logentry/logql"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
-
 	lokiflag "github.com/grafana/loki/pkg/util/flagext"
 )
 
-var defaultClientCfg = client.Config{}
+var defaultClientCfg = config2.Config{}
 
 func init() {
 	// Init everything with default values.
@@ -43,7 +42,7 @@ const (
 )
 
 type config struct {
-	clientConfig         client.Config
+	clientConfig         config2.Config
 	bufferConfig         bufferConfig
 	logLevel             logging.Level
 	autoKubernetesLabels bool

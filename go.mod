@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-lambda-go v1.17.0
 	github.com/bmatcuk/doublestar v1.2.2
 	github.com/c2h5oh/datasize v0.0.0-20200112174442-28bbd4740fee
+	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/cespare/xxhash/v2 v2.1.1
 	github.com/containerd/fifo v0.0.0-20190226154929-a9fb20d87448 // indirect
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf
@@ -19,6 +20,7 @@ require (
 	github.com/docker/go-plugins-helpers v0.0.0-20181025120712-1e6269c305b8
 	github.com/drone/envsubst v1.0.2
 	github.com/dustin/go-humanize v1.0.0
+	github.com/elastic/go-elasticsearch/v7 v7.12.0
 	github.com/fatih/color v1.9.0
 	github.com/felixge/fgprof v0.9.1
 	github.com/fluent/fluent-bit-go v0.0.0-20190925192703-ea13c021720c
@@ -56,6 +58,7 @@ require (
 	github.com/segmentio/fasthash v1.0.2
 	github.com/shurcooL/httpfs v0.0.0-20190707220628-8d4bc4ba7749
 	github.com/shurcooL/vfsgen v0.0.0-20200824052919-0d455de96546
+	github.com/sirupsen/logrus v1.7.0
 	github.com/spf13/afero v1.2.2
 	github.com/stretchr/testify v1.7.0
 	github.com/tonistiigi/fifo v0.0.0-20190226154929-a9fb20d87448

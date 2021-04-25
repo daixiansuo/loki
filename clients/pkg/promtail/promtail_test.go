@@ -3,6 +3,7 @@ package promtail
 import (
 	"context"
 	"fmt"
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"io"
 	"io/ioutil"
 	"math"
@@ -649,7 +650,7 @@ func Test_DryRun(t *testing.T) {
 
 	prometheus.DefaultRegisterer = prometheus.NewRegistry() // reset registry, otherwise you can't create 2 weavework server.
 	_, err = New(config.Config{
-		ClientConfig: client.Config{URL: flagext.URLValue{URL: &url.URL{Host: "string"}}},
+		ClientConfig: config2.Config{URL: flagext.URLValue{URL: &url.URL{Host: "string"}}},
 		PositionsConfig: positions.Config{
 			PositionsFile: f.Name(),
 			SyncPeriod:    time.Second,
@@ -660,7 +661,7 @@ func Test_DryRun(t *testing.T) {
 	prometheus.DefaultRegisterer = prometheus.NewRegistry()
 
 	p, err := New(config.Config{
-		ClientConfig: client.Config{URL: flagext.URLValue{URL: &url.URL{Host: "string"}}},
+		ClientConfig: config2.Config{URL: flagext.URLValue{URL: &url.URL{Host: "string"}}},
 		PositionsConfig: positions.Config{
 			PositionsFile: f.Name(),
 			SyncPeriod:    time.Second,

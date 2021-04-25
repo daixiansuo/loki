@@ -151,6 +151,9 @@ github.com/bradfitz/gomemcache/memcache
 # github.com/c2h5oh/datasize v0.0.0-20200112174442-28bbd4740fee
 ## explicit
 github.com/c2h5oh/datasize
+# github.com/cenkalti/backoff v2.2.1+incompatible
+## explicit
+github.com/cenkalti/backoff
 # github.com/cenkalti/backoff/v4 v4.0.2
 github.com/cenkalti/backoff/v4
 # github.com/cespare/xxhash v1.1.0
@@ -362,6 +365,12 @@ github.com/drone/envsubst/path
 github.com/dustin/go-humanize
 # github.com/edsrzf/mmap-go v1.0.0
 github.com/edsrzf/mmap-go
+# github.com/elastic/go-elasticsearch/v7 v7.12.0
+## explicit
+github.com/elastic/go-elasticsearch/v7
+github.com/elastic/go-elasticsearch/v7/esapi
+github.com/elastic/go-elasticsearch/v7/estransport
+github.com/elastic/go-elasticsearch/v7/internal/version
 # github.com/facette/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 github.com/facette/natsort
 # github.com/fatih/color v1.9.0
@@ -869,6 +878,7 @@ github.com/shurcooL/httpfs/vfsutil
 ## explicit
 github.com/shurcooL/vfsgen
 # github.com/sirupsen/logrus v1.7.0
+## explicit
 github.com/sirupsen/logrus
 # github.com/soheilhy/cmux v0.1.5-0.20210205191134-5ec6847320e5
 github.com/soheilhy/cmux

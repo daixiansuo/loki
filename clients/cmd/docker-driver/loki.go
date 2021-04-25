@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	loki2 "github.com/grafana/loki/clients/pkg/promtail/client/loki"
 
 	"github.com/docker/docker/daemon/logger"
 	"github.com/go-kit/kit/log"
@@ -11,15 +12,13 @@ import (
 
 	"github.com/grafana/loki/clients/pkg/logentry/stages"
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
-
 	"github.com/grafana/loki/pkg/logproto"
 )
 
 var jobName = "docker"
 
 type loki struct {
-	client  client.Client
+	client  loki2.Client
 	handler api.EntryHandler
 	labels  model.LabelSet
 	logger  log.Logger
@@ -34,7 +33,7 @@ func New(logCtx logger.Info, logger log.Logger) (logger.Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, err := client.New(prometheus.DefaultRegisterer, cfg.clientConfig, logger)
+	c, err := loki2.New(prometheus.DefaultRegisterer, cfg.clientConfig, logger)
 	if err != nil {
 		return nil, err
 	}

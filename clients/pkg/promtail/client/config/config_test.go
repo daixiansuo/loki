@@ -1,6 +1,8 @@
-package client
+package config
 
 import (
+	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
+	fe "github.com/grafana/loki/pkg/util/flagext"
 	"net/url"
 	"reflect"
 	"testing"
@@ -17,10 +19,12 @@ var clientConfig = Config{}
 
 var clientDefaultConfig = (`
 url: http://localhost:3100/loki/api/v1/push
+kind: loki
 `)
 
-var clientCustomConfig = `
+var clientCustomLokiConfig = `
 url: http://localhost:3100/loki/api/v1/push
+kind: loki
 backoff_config:
   max_retries: 20
   min_period: 5s
@@ -28,6 +32,9 @@ backoff_config:
 batchwait: 5s
 batchsize: 204800
 timeout: 5s
+`
+
+var clientMultiCustomEsConfig = `
 `
 
 func Test_Config(t *testing.T) {
@@ -38,35 +45,22 @@ func Test_Config(t *testing.T) {
 		expectedConfig Config
 	}{
 		{
-			clientDefaultConfig,
+			clientCustomLokiConfig,
 			Config{
-				URL: flagext.URLValue{
-					URL: u,
+				Kind: LokiClient,
+				LokiConfig: loki.LokiConfig{
+					URL:            flagext.URLValue{URL:u},
+					BatchWait:      5 * time.Second,
+					BatchSize:      100 * 2048,
+					BackoffConfig:  util.BackoffConfig{
+						MaxRetries: 20,
+						MaxBackoff: 1 * time.Minute,
+						MinBackoff: 5 * time.Second,
+					},
+					ExternalLabels: fe.LabelSet{},
+					Timeout:        5 * time.Second,
+
 				},
-				BackoffConfig: util.BackoffConfig{
-					MaxBackoff: MaxBackoff,
-					MaxRetries: MaxRetries,
-					MinBackoff: MinBackoff,
-				},
-				BatchSize: BatchSize,
-				BatchWait: BatchWait,
-				Timeout:   Timeout,
-			},
-		},
-		{
-			clientCustomConfig,
-			Config{
-				URL: flagext.URLValue{
-					URL: u,
-				},
-				BackoffConfig: util.BackoffConfig{
-					MaxBackoff: 1 * time.Minute,
-					MaxRetries: 20,
-					MinBackoff: 5 * time.Second,
-				},
-				BatchSize: 100 * 2048,
-				BatchWait: 5 * time.Second,
-				Timeout:   5 * time.Second,
 			},
 		},
 	}

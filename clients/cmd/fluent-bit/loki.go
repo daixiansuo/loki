@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	loki2 "github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"os"
 	"sort"
 	"strings"
@@ -17,8 +18,6 @@ import (
 	"github.com/weaveworks/common/logging"
 
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
-
 	"github.com/grafana/loki/pkg/logproto"
 )
 
@@ -29,7 +28,7 @@ var (
 
 type loki struct {
 	cfg    *config
-	client client.Client
+	client loki2.Client
 	logger log.Logger
 }
 

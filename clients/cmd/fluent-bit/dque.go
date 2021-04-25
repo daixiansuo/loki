@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	loki2 "github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"os"
 	"sync"
 	"time"
@@ -13,8 +14,6 @@ import (
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
-
 	"github.com/grafana/loki/pkg/logproto"
 )
 
@@ -45,14 +44,14 @@ func dqueEntryBuilder() interface{} {
 type dqueClient struct {
 	logger  log.Logger
 	queue   *dque.DQue
-	loki    client.Client
+	loki    loki2.Client
 	once    sync.Once
 	wg      sync.WaitGroup
 	entries chan api.Entry
 }
 
 // New makes a new dque loki client
-func newDque(cfg *config, logger log.Logger) (client.Client, error) {
+func newDque(cfg *config, logger log.Logger) (loki2.Client, error) {
 	var err error
 
 	q := &dqueClient{
@@ -73,7 +72,7 @@ func newDque(cfg *config, logger log.Logger) (client.Client, error) {
 		_ = q.queue.TurboOn()
 	}
 
-	q.loki, err = client.New(prometheus.DefaultRegisterer, cfg.clientConfig, logger)
+	q.loki, err = loki2.New(prometheus.DefaultRegisterer, cfg.clientConfig, logger)
 	if err != nil {
 		return nil, err
 	}

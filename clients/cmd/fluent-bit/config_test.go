@@ -1,6 +1,7 @@
 package main
 
 import (
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"io/ioutil"
 	"net/url"
 	"os"
@@ -13,8 +14,6 @@ import (
 	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/cortexproject/cortex/pkg/util/flagext"
 	"github.com/weaveworks/common/logging"
-
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 
 	lokiflag "github.com/grafana/loki/pkg/util/flagext"
 )
@@ -39,7 +38,7 @@ func Test_parseConfig(t *testing.T) {
 			map[string]string{},
 			&config{
 				lineFormat: jsonFormat,
-				clientConfig: client.Config{
+				clientConfig: config2.Config{
 					URL:            mustParseURL("http://localhost:3100/loki/api/v1/push"),
 					BatchSize:      defaultClientCfg.BatchSize,
 					BatchWait:      defaultClientCfg.BatchWait,
@@ -70,7 +69,7 @@ func Test_parseConfig(t *testing.T) {
 			},
 			&config{
 				lineFormat: kvPairFormat,
-				clientConfig: client.Config{
+				clientConfig: config2.Config{
 					URL:            mustParseURL("http://somewhere.com:3100/loki/api/v1/push"),
 					TenantID:       "my-tenant-id",
 					BatchSize:      100,
@@ -104,7 +103,7 @@ func Test_parseConfig(t *testing.T) {
 			},
 			&config{
 				lineFormat: kvPairFormat,
-				clientConfig: client.Config{
+				clientConfig: config2.Config{
 					URL:            mustParseURL("http://somewhere.com:3100/loki/api/v1/push"),
 					TenantID:       "", // empty as not set in fluent-bit plugin config map
 					BatchSize:      100,

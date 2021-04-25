@@ -1,4 +1,4 @@
-package client
+package loki
 
 import (
 	"bufio"
@@ -133,17 +133,13 @@ func mustRegisterOrGet(reg prometheus.Registerer, c prometheus.Collector) promet
 }
 
 // Client pushes entries to Loki and can be stopped
-type Client interface {
-	api.EntryHandler
-	// Stop goroutine sending batch of entries without retries.
-	StopNow()
-}
+
 
 // Client for pushing logs in snappy-compressed protos over HTTP.
 type client struct {
 	metrics *metrics
 	logger  log.Logger
-	cfg     Config
+	cfg    LokiConfig
 	client  *http.Client
 	entries chan api.Entry
 
@@ -158,7 +154,7 @@ type client struct {
 }
 
 // New makes a new Client.
-func New(reg prometheus.Registerer, cfg Config, logger log.Logger) (Client, error) {
+func New(reg prometheus.Registerer, cfg LokiConfig, logger log.Logger) (*client, error) {
 	if cfg.URL.URL == nil {
 		return nil, errors.New("client needs target URL")
 	}
@@ -229,6 +225,7 @@ func (c *client) run() {
 	for {
 		select {
 		case e, ok := <-c.entries:
+			// 获取到条目
 			if !ok {
 				return
 			}

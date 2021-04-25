@@ -2,8 +2,8 @@ package config
 
 import (
 	"flag"
+	"github.com/grafana/loki/clients/pkg/promtail/client/config"
 
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 	"github.com/grafana/loki/clients/pkg/promtail/positions"
 	"github.com/grafana/loki/clients/pkg/promtail/scrapeconfig"
 	"github.com/grafana/loki/clients/pkg/promtail/server"
@@ -14,8 +14,8 @@ import (
 type Config struct {
 	ServerConfig server.Config `yaml:"server,omitempty"`
 	// deprecated use ClientConfigs instead
-	ClientConfig    client.Config         `yaml:"client,omitempty"`
-	ClientConfigs   []client.Config       `yaml:"clients,omitempty"`
+	ClientConfig    config.Config         `yaml:"client,omitempty"`
+	ClientConfigs   []config.Config       `yaml:"clients,omitempty"`
 	PositionsConfig positions.Config      `yaml:"positions,omitempty"`
 	ScrapeConfig    []scrapeconfig.Config `yaml:"scrape_configs,omitempty"`
 	TargetConfig    file.Config           `yaml:"target_config,omitempty"`

@@ -2,10 +2,9 @@ package main
 
 import (
 	"fmt"
+	loki2 "github.com/grafana/loki/clients/pkg/promtail/client/loki"
 
 	"github.com/go-kit/kit/log"
-
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 )
 
 type bufferConfig struct {
@@ -21,7 +20,7 @@ var defaultBufferConfig = bufferConfig{
 }
 
 // NewBuffer makes a new buffered Client.
-func NewBuffer(cfg *config, logger log.Logger) (client.Client, error) {
+func NewBuffer(cfg *config, logger log.Logger) (loki2.Client, error) {
 	switch cfg.bufferConfig.bufferType {
 	case "dque":
 		return newDque(cfg, logger)

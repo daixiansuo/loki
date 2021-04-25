@@ -1,6 +1,7 @@
-package client
+package loki
 
 import (
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -253,7 +254,7 @@ func TestClient_Handle(t *testing.T) {
 			require.NoError(t, err)
 
 			// Instance the client
-			cfg := Config{
+			cfg := config2.Config{
 				URL:            serverURL,
 				BatchWait:      testData.clientBatchWait,
 				BatchSize:      testData.clientBatchSize,
@@ -385,7 +386,7 @@ func TestClient_StopNow(t *testing.T) {
 			require.NoError(t, err)
 
 			// Instance the client
-			cfg := Config{
+			cfg := config2.Config{
 				URL:            serverURL,
 				BatchWait:      c.clientBatchWait,
 				BatchSize:      c.clientBatchSize,

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"io/ioutil"
 	"net/url"
 	"os"
@@ -21,7 +22,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/grafana/loki/clients/pkg/logentry/stages"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 	"github.com/grafana/loki/clients/pkg/promtail/targets/file"
 
 	"github.com/grafana/loki/pkg/util"
@@ -68,21 +68,21 @@ const (
 )
 
 var (
-	defaultClientConfig = client.Config{
-		BatchWait: client.BatchWait,
-		BatchSize: client.BatchSize,
+	defaultClientConfig = config2.Config{
+		BatchWait: config2.BatchWait,
+		BatchSize: config2.BatchSize,
 		BackoffConfig: cortex_util.BackoffConfig{
-			MinBackoff: client.MinBackoff,
-			MaxBackoff: client.MaxBackoff,
-			MaxRetries: client.MaxRetries,
+			MinBackoff: config2.MinBackoff,
+			MaxBackoff: config2.MaxBackoff,
+			MaxRetries: config2.MaxRetries,
 		},
-		Timeout: client.Timeout,
+		Timeout: config2.Timeout,
 	}
 )
 
 type config struct {
 	labels       model.LabelSet
-	clientConfig client.Config
+	clientConfig config2.Config
 	pipeline     PipelineConfig
 }
 

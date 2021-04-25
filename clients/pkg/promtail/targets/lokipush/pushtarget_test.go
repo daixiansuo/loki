@@ -2,6 +2,8 @@ package lokipush
 
 import (
 	"flag"
+	config2 "github.com/grafana/loki/clients/pkg/promtail/client/config"
+	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"net"
 	"os"
 	"strconv"
@@ -17,7 +19,6 @@ import (
 	"github.com/weaveworks/common/server"
 
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 	"github.com/grafana/loki/clients/pkg/promtail/client/fake"
 	"github.com/grafana/loki/clients/pkg/promtail/scrapeconfig"
 
@@ -73,13 +74,13 @@ func TestPushTarget(t *testing.T) {
 	err = serverURL.Set("http://127.0.0.1:" + strconv.Itoa(port) + "/loki/api/v1/push")
 	require.NoError(t, err)
 
-	ccfg := client.Config{
+	ccfg := config2.Config{
 		URL:       serverURL,
 		Timeout:   1 * time.Second,
 		BatchWait: 1 * time.Second,
 		BatchSize: 100 * 1024,
 	}
-	pc, err := client.New(prometheus.DefaultRegisterer, ccfg, logger)
+	pc, err := loki.New(prometheus.DefaultRegisterer, ccfg, logger)
 	require.NoError(t, err)
 	defer pc.Stop()
 

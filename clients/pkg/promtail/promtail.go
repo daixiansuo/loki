@@ -1,6 +1,7 @@
 package promtail
 
 import (
+	"github.com/grafana/loki/pkg/util/flagext"
 	"sync"
 
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
@@ -55,7 +56,7 @@ func New(cfg config.Config, dryRun bool, opts ...Option) (*Promtail, error) {
 		o(promtail)
 	}
 
-	if cfg.ClientConfig.URL.URL != nil {
+	if cfg.ClientConfig.LokiConfig.URL.URL != nil {
 		// if a single client config is used we add it to the multiple client config for backward compatibility
 		cfg.ClientConfigs = append(cfg.ClientConfigs, cfg.ClientConfig)
 	}
@@ -71,13 +72,13 @@ func New(cfg config.Config, dryRun bool, opts ...Option) (*Promtail, error) {
 
 	var err error
 	if dryRun {
-		promtail.client, err = client.NewLogger(prometheus.DefaultRegisterer, promtail.logger, cfg.ClientConfig.ExternalLabels, cfg.ClientConfigs...)
+		promtail.client, err = client.NewLogger(prometheus.DefaultRegisterer, promtail.logger, flagext.LabelSet{}, cfg.ClientConfigs...)
 		if err != nil {
 			return nil, err
 		}
 		cfg.PositionsConfig.ReadOnly = true
 	} else {
-		promtail.client, err = client.NewMulti(prometheus.DefaultRegisterer, promtail.logger, cfg.ClientConfig.ExternalLabels, cfg.ClientConfigs...)
+		promtail.client, err = client.NewMulti(prometheus.DefaultRegisterer, promtail.logger, flagext.LabelSet{}, cfg.ClientConfigs...)
 		if err != nil {
 			return nil, err
 		}

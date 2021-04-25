@@ -1,6 +1,8 @@
 package client
 
 import (
+	"github.com/grafana/loki/clients/pkg/promtail/client/config"
+	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"net/url"
 	"reflect"
 	"testing"
@@ -23,19 +25,19 @@ import (
 )
 
 func TestNewMulti(t *testing.T) {
-	_, err := NewMulti(nil, util_log.Logger, lokiflag.LabelSet{}, []Config{}...)
+	_, err := NewMulti(nil, util_log.Logger, lokiflag.LabelSet{}, []config.Config{}...)
 	if err == nil {
 		t.Fatal("expected err but got nil")
 	}
 	host1, _ := url.Parse("http://localhost:3100")
 	host2, _ := url.Parse("https://grafana.com")
-	cc1 := Config{
+	cc1 := config.Config{
 		BatchSize:      20,
 		BatchWait:      1 * time.Second,
 		URL:            flagext.URLValue{URL: host1},
 		ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"order": "yaml"}},
 	}
-	cc2 := Config{
+	cc2 := config.Config{
 		BatchSize:      10,
 		BatchWait:      1 * time.Second,
 		URL:            flagext.URLValue{URL: host2},
@@ -50,9 +52,10 @@ func TestNewMulti(t *testing.T) {
 	if len(multi.clients) != 2 {
 		t.Fatalf("expected client: 2 got:%d", len(multi.clients))
 	}
-	actualCfg1 := clients.(*MultiClient).clients[0].(*client).cfg
+	actualCfg1 := clients.(*MultiClient).clients[0].(*loki.client).cfg
 	// Yaml should overried the command line so 'order: yaml' should be expected
-	expectedCfg1 := Config{
+	expectedCfg1 := config.Config{
+		Kind: config.LokiClient,
 		BatchSize:      20,
 		BatchWait:      1 * time.Second,
 		URL:            flagext.URLValue{URL: host1},
@@ -63,9 +66,10 @@ func TestNewMulti(t *testing.T) {
 		t.Fatalf("expected cfg: %v got:%v", expectedCfg1, actualCfg1)
 	}
 
-	actualCfg2 := clients.(*MultiClient).clients[1].(*client).cfg
+	actualCfg2 := clients.(*MultiClient).clients[1].(*loki.client).cfg
 	// No overlapping label keys so both should be in the output
-	expectedCfg2 := Config{
+	expectedCfg2 := config.Config{
+		Kind: config.LokiClient,
 		BatchSize: 10,
 		BatchWait: 1 * time.Second,
 		URL:       flagext.URLValue{URL: host2},
@@ -123,18 +127,18 @@ func TestMultiClient_Handle(t *testing.T) {
 func TestMultiClient_Handle_Race(t *testing.T) {
 	u := flagext.URLValue{}
 	require.NoError(t, u.Set("http://localhost"))
-	c1, err := New(nil, Config{URL: u, BackoffConfig: util.BackoffConfig{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
+	c1, err := loki.New(nil, config.Config{URL: u, BackoffConfig: util.BackoffConfig{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
 	require.NoError(t, err)
-	c2, err := New(nil, Config{URL: u, BackoffConfig: util.BackoffConfig{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
+	c2, err := loki.New(nil, config.Config{URL: u, BackoffConfig: util.BackoffConfig{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
 	require.NoError(t, err)
-	clients := []Client{c1, c2}
+	clients := []loki.Client{c1, c2}
 	m := &MultiClient{
 		clients: clients,
 		entries: make(chan api.Entry),
 	}
 	m.start()
 
-	m.Chan() <- api.Entry{Labels: model.LabelSet{"foo": "bar", ReservedLabelTenantID: "1"}, Entry: logproto.Entry{Line: "foo"}}
+	m.Chan() <- api.Entry{Labels: model.LabelSet{"foo": "bar", loki.ReservedLabelTenantID: "1"}, Entry: logproto.Entry{Line: "foo"}}
 
 	m.Stop()
 }

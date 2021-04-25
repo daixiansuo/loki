@@ -2,6 +2,7 @@ package file
 
 import (
 	"flag"
+	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,7 +15,6 @@ import (
 	fsnotify "gopkg.in/fsnotify.v1"
 
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client"
 	"github.com/grafana/loki/clients/pkg/promtail/positions"
 	"github.com/grafana/loki/clients/pkg/promtail/targets/target"
 
@@ -301,7 +301,7 @@ func (t *FileTarget) stopTailingAndRemovePosition(ps []string) {
 			delete(t.tails, p)
 		}
 		if h, ok := t.handler.(api.InstrumentedEntryHandler); ok {
-			h.UnregisterLatencyMetric(model.LabelSet{model.LabelName(client.LatencyLabel): model.LabelValue(p)})
+			h.UnregisterLatencyMetric(model.LabelSet{model.LabelName(loki.LatencyLabel): model.LabelValue(p)})
 		}
 	}
 }
