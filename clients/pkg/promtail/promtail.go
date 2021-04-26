@@ -1,6 +1,7 @@
 package promtail
 
 import (
+	"github.com/grafana/loki/clients/pkg/promtail/client"
 	"github.com/grafana/loki/pkg/util/flagext"
 	"sync"
 
@@ -8,7 +9,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/grafana/loki/clients/pkg/promtail/client"
+	clientconfig "github.com/grafana/loki/clients/pkg/promtail/client/config"
 	"github.com/grafana/loki/clients/pkg/promtail/config"
 	"github.com/grafana/loki/clients/pkg/promtail/server"
 	"github.com/grafana/loki/clients/pkg/promtail/targets"
@@ -34,7 +35,7 @@ func WithRegisterer(reg prometheus.Registerer) Option {
 
 // Promtail is the root struct for Promtail.
 type Promtail struct {
-	client         client.Client
+	client         clientconfig.Client
 	targetManagers *targets.TargetManagers
 	server         server.Server
 	logger         log.Logger
@@ -110,7 +111,7 @@ func (p *Promtail) Run() error {
 }
 
 // Client returns the underlying client Promtail uses to write to Loki.
-func (p *Promtail) Client() client.Client {
+func (p *Promtail) Client() clientconfig.Client {
 	return p.client
 }
 

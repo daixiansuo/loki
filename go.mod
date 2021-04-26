@@ -46,6 +46,7 @@ require (
 	github.com/mitchellh/mapstructure v1.3.3
 	github.com/modern-go/reflect2 v1.0.1
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f
+	github.com/olivere/elastic/v7 v7.0.24 // indirect
 	github.com/opentracing/opentracing-go v1.2.0
 	// github.com/pierrec/lz4 v2.0.5+incompatible
 	github.com/pierrec/lz4/v4 v4.1.1

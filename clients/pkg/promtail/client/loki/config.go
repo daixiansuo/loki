@@ -37,6 +37,18 @@ type LokiConfig struct {
 	TenantID string `yaml:"tenant_id"`
 }
 
+func DefaultLokiConfig()LokiConfig{
+	return LokiConfig{
+		BackoffConfig: util.BackoffConfig{
+			MaxBackoff: MaxBackoff,
+			MaxRetries: MaxRetries,
+			MinBackoff: MinBackoff,
+		},
+		BatchSize: BatchSize,
+		BatchWait: BatchWait,
+		Timeout:   Timeout,
+	}
+}
 
 func (c *LokiConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.Var(&c.URL, prefix+"client.url", "URL of log server")
@@ -50,4 +62,8 @@ func (c *LokiConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.Var(&c.ExternalLabels, prefix+"client.external-labels", "list of external labels to add to each log (e.g: --client.external-labels=lb1=v1,lb2=v2)")
 
 	f.StringVar(&c.TenantID, prefix+"client.tenant-id", "", "Tenant ID to use when pushing logs to Loki.")
+}
+
+func(c *LokiConfig)RegisterFlags(flags *flag.FlagSet){
+
 }

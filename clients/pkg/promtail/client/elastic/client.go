@@ -1,17 +1,13 @@
 package elastic
 
 import (
-	"bytes"
 	"context"
-	"github.com/cenkalti/backoff"
-	"github.com/sirupsen/logrus"
-
-	"github.com/cortexproject/cortex/pkg/util"
-	"github.com/go-kit/kit/log"
+	"fmt"
 	elasticsearch7 "github.com/elastic/go-elasticsearch/v7"
-	"github.com/go-kit/kit/log/level"
+	"github.com/elastic/go-elasticsearch/v7/esutil"
+	"github.com/go-kit/kit/log"
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"sync"
@@ -20,7 +16,23 @@ import (
 
 const (
 	IndexerLabel model.LabelName = "indexer"
+	defaultIndexId = "promtail"
+	defaultBatchNum = 1000
 )
+
+
+type Article struct {
+	ID        int       `json:"id"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	Published time.Time `json:"published"`
+	Author    Author    `json:"author"`
+}
+
+type Author struct {
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
 
 
 type client struct {
@@ -31,7 +43,7 @@ type client struct {
 	once sync.Once
 	wg   sync.WaitGroup
 
-	indexers []string
+	indexerHash map[string]bool
 
 	ctx context.Context
 	cancelFunc context.CancelFunc
@@ -44,33 +56,35 @@ func New(reg prometheus.Registerer, cfg EsClientConfig, logger log.Logger)(*clie
 	if err != nil{
 		return nil, err
 	}
+	// check elastic server is reachedable
+	if err != nil{
+		return nil, errors.New(fmt.Sprintf("check elastic client failed %v",err.Error()))
+	}
 
 	ctx,cancel := context.WithCancel(context.Background())
 	c := &client{
-		cfg:     EsClientConfig{},
+		cfg:     cfg,
 		entries: make(chan api.Entry),
 		client:  escli,
 		once:    sync.Once{},
 		wg:      sync.WaitGroup{},
 		ctx: ctx,
 		cancelFunc: cancel,
+		logger: logger,
+		indexerHash: make(map[string]bool, 100),
 	}
 	c.wg.Add(1)
+	go c.run()
 	return c, nil
 }
 
 
 func newClientFromConfig(cfg *EsClientConfig)(*elasticsearch7.Client,error){
-	retryBackOff := backoff.NewExponentialBackOff()
+
 	escfg := elasticsearch7.Config{
 		MaxRetries: 5,
 		RetryOnStatus: []int{502,503, 504,429},
-		RetryBackoff: func(attempt int) time.Duration {
-			if attempt == 1{
-				retryBackOff.Reset()
-			}
-			return retryBackOff.NextBackOff()
-		},
+
 	}
 	if len(cfg.EsUser) != 0{
 		escfg.Username = cfg.EsUser
@@ -92,7 +106,7 @@ func (c *client) Chan() chan<- api.Entry {
 
 
 func(c *client)run(){
-	batches := map[string]*batch{}
+	bulks := map[string]*bulk{}
 	// 最小等待时间
 	minWaitCheckFrequency := 10 * time.Millisecond
 	// 最大等待时间
@@ -106,11 +120,10 @@ func(c *client)run(){
 	defer func() {
 		maxWaitCheck.Stop()
 		// Send all pending batches
-		for indexerId, batch := range batches {
+		for indexerId, bulkItems := range bulks {
 			// 清空所有的batch，将还没发送出去的全部发送出去
-			c.sendBatch(indexerId, batch)
+			c.sendBatch(indexerId, bulkItems)
 		}
-
 		c.wg.Done()
 	}()
 
@@ -120,36 +133,31 @@ func(c *client)run(){
 			if !ok {
 				return
 			}
-			indexerId := c.generateIndexerId(&e)
-			batch, ok := batches[indexerId]
+			indexerId := generateIndexerId(&e)
+			bulk, ok := bulks[indexerId]
 
 			// If the batch doesn't exist yet, we create a new one with the entry
 			if !ok {
-				batches[indexerId] = newBatch(e)
+				bulks[indexerId] = newBulk(e)
 				break
 			}
 
-			// If adding the entry to the batch will increase the size over the max
-			// size allowed, we do send the current batch and then create a new one
-			if batch.sizeBytesAfter(e) > c.cfg.BatchSize {
-				c.sendBatch(indexerId, batch)
-
-				batches[indexerId] = newBatch(e)
-				break
+			if bulk.numEntryItems() > defaultBatchNum{
+				c.sendBatch(indexerId, bulk)
+				bulks[indexerId] = newBulk(e)
 			}
 
 			// The max size of the batch isn't reached, so we can add the entry
-			batch.add(e)
+			bulk.add(e)
 
 		case <-maxWaitCheck.C:
 			// Send all batches whose max wait time has been reached
-			for indexer, batch := range batches {
+			for indexer, batch := range bulks {
 				if batch.age() < c.cfg.BatchWait {
 					continue
 				}
-
 				c.sendBatch(indexer, batch)
-				delete(batches, indexer)
+				delete(bulks, indexer)
 			}
 		}
 	}
@@ -169,62 +177,58 @@ func (c *client) StopNow() {
 	c.Stop()
 }
 
+func (c *client) sendBatch(indexerId string, batch *bulk) {
+	if _,ok := c.indexerHash[indexerId]; !ok {
+		// 如果索引不存在，则创建一个新索引
+		res, err := c.client.Indices.Create(indexerId)
+		if err != nil {
+			c.logger.Log("Cannot create index", err)
+			return
+		}
+		c.indexerHash[indexerId] = true
+		if res.IsError() {
+			c.logger.Log("Cannot create index", res)
+			return
+		}
+		res.Body.Close()
+	}
 
-
-func (c *client) sendBatch(indexerId string, batch *batch) {
-	buf, _, err := batch.encode()
-	if err != nil {
-		level.Error(c.logger).Log("msg", "error encoding batch", "error", err)
+	bi, err := esutil.NewBulkIndexer(esutil.BulkIndexerConfig{
+		Index:         indexerId,        // The default index name
+		Client:        c.client,               // The Elasticsearch client
+		FlushInterval: 30 * time.Second, // The periodic flush interval
+	})
+	if err != nil{
 		return
 	}
 
-
-	backoff := util.NewBackoff(c.ctx, c.cfg.BackoffConfig)
-	var status int
-	for {
-
-		// send uses `timeout` internally, so `context.Background` is good enough.
-		status, err = c.send(context.Background(), indexerId, buf)
-
-
-		// Only retry 429s, 500s and connection-level errors.
-		if status > 0 && status != 429 && status/100 != 5 {
-			break
-		}
-
-		level.Warn(c.logger).Log("msg", "error sending batch, will retry", "status", status, "error", err)
-
-		backoff.Wait()
-
-		// Make sure it sends at least once before checking for retry.
-		if !backoff.Ongoing() {
-			break
-		}
+	for _, a := range batch.bulkItems {
+		err = bi.Add(
+			context.Background(),
+			*a,
+		)
+		// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 	}
 
-	if err != nil {
-		level.Error(c.logger).Log("msg", "final error sending batch", "status", status, "error", err)
-
+	if err := bi.Close(context.Background()); err != nil {
+		c.logger.Log("Unexpected error: %s", err)
 	}
+	// <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
 }
 
 func (c *client) send(ctx context.Context, indexerId string, buf []byte) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
-	defer cancel()
-	logrus.Errorf("[%v]debug->essend: %v", indexerId,string(buf))
-	_,_ = c.client.Bulk(bytes.NewReader(buf), c.client.Bulk.WithIndex(indexerId))
+
 	return 0, nil
-	// If the tenant ID is not empty promtail is running in multi-tenant mode, so
-	// we should send it to Loki
 
 }
 
 
 
-func (c *client) generateIndexerId(e *api.Entry) string {
+func generateIndexerId(e *api.Entry) string {
 	// get indexer name
 	if indexer, ok := e.Labels[IndexerLabel]; ok {
 		return string(indexer)
 	}
-	return ""
+	return defaultIndexId
 }

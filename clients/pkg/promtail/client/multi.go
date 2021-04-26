@@ -2,10 +2,9 @@ package client
 
 import (
 	"errors"
+	util_log "github.com/cortexproject/cortex/pkg/util/log"
+	"github.com/go-kit/kit/log/level"
 	"github.com/grafana/loki/clients/pkg/promtail/client/config"
-	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
-	"github.com/grafana/loki/clients/pkg/promtail/client/elastic"
-	"github.com/sirupsen/logrus"
 	"sync"
 
 	"github.com/go-kit/kit/log"
@@ -17,15 +16,11 @@ import (
 )
 
 
-type Client interface {
-	api.EntryHandler
-	// Stop goroutine sending batch of entries without retries.
-	StopNow()
-}
+
 
 // MultiClient is client pushing to one or more loki instances.
 type MultiClient struct {
-	clients []Client
+	clients []config.Client
 	entries chan api.Entry
 	wg      sync.WaitGroup
 
@@ -33,12 +28,13 @@ type MultiClient struct {
 }
 
 // NewMulti creates a new client
-func NewMulti(reg prometheus.Registerer, logger log.Logger, externalLabels flagext.LabelSet, cfgs ...config.Config) (Client, error) {
+func NewMulti(reg prometheus.Registerer, logger log.Logger, externalLabels flagext.LabelSet, cfgs ...config.Config) (config.Client, error) {
 	if len(cfgs) == 0 {
 		return nil, errors.New("at least one client config should be provided")
 	}
 
-	clients := make([]Client, 0, len(cfgs))
+	clients := make([]config.Client, 0, len(cfgs))
+
 	for _, cfg := range cfgs {
 
 		// Merge the provided external labels from the single client config/command line with each client config from
@@ -47,22 +43,9 @@ func NewMulti(reg prometheus.Registerer, logger log.Logger, externalLabels flage
 		// which exist in both the command line arguments as well as the yaml, and while this is
 		// not typically the order of precedence, the assumption here is someone providing a specific config in
 		// yaml is doing so explicitly to make a key specific to a client.
-		var client Client
-		var err error
-		switch cfg.Kind {
-		case config.LokiClient:
-			cfg.LokiConfig.ExternalLabels = flagext.LabelSet{LabelSet: externalLabels.Merge(cfg.LokiConfig.ExternalLabels.LabelSet)}
-			client, err = loki.New(reg, cfg.LokiConfig, logger)
-			if err != nil{
-				return nil, err
-			}
-		case config.ElasticSearchClient:
-			client,err = elastic.New(reg, cfg.ElasticSearch, logger)
-			if err != nil{
-				return nil, err
-			}
-		default:
-			logrus.Errorf("unknown client type, current only support send to to elasticsearch or loki ")
+		client,err := cfg.NewClientFromConfig(reg, logger)
+		if err != nil{
+			level.Error(util_log.Logger).Log("msg", "failed to create client", "err", err.Error())
 		}
 		//client, err := loki.New(reg, cfg.LokiConfig, logger)
 		//if err != nil {

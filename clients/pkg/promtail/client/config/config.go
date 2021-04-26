@@ -2,10 +2,21 @@ package config
 
 import (
 	"flag"
-	"github.com/cortexproject/cortex/pkg/util"
+	"github.com/go-kit/kit/log"
+	"github.com/grafana/loki/clients/pkg/promtail/api"
 	"github.com/grafana/loki/clients/pkg/promtail/client/elastic"
 	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
+	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+
 )
+
+type Client interface {
+	api.EntryHandler
+	// Stop goroutine sending batch of entries without retries.
+	StopNow()
+}
+
 
 type ClientKind string
 const (
@@ -13,31 +24,42 @@ const (
 	LokiClient ClientKind = "loki"
 )
 
+
+type RunnerAble interface {
+	api.EntryHandler
+	// Stop goroutine sending batch of entries without retries.
+	StopNow()
+}
+
 // NOTE the helm chart for promtail and fluent-bit also have defaults for these values, please update to match if you make changes here.
 
 
 // Config describes configuration for a HTTP pusher client.
 type Config struct {
-	Kind ClientKind
 	// lokiconfig
-	LokiConfig loki.LokiConfig
-	// elasticsearch
-	ElasticSearch elastic.EsClientConfig
-
-
+	LokiConfig loki.LokiConfig `yaml:"loki_config"`
+	// elasticsearch'
+	ElasticConfig elastic.EsClientConfig `yaml:"es_config"`
 }
 
 // RegisterFlags with prefix registers flags where every name is prefixed by
 // prefix. If prefix is a non-empty string, prefix should end with a period.
 func (c *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
-	c.LokiConfig.RegisterFlagsWithPrefix(prefix, f)
-	c.ElasticSearch.RegisterFlagsWithPrefix(prefix, f)
+	if c.LokiConfig.URL.URL != nil{
+		c.LokiConfig.RegisterFlagsWithPrefix(prefix, f)
+	}else if c.ElasticConfig.EsAddress != ""{
+		c.ElasticConfig.RegisterFlagsWithPrefix(prefix, f)
+	}
 
 }
 
 // RegisterFlags registers flags.
 func (c *Config) RegisterFlags(flags *flag.FlagSet) {
-	c.RegisterFlagsWithPrefix("", flags)
+	if c.LokiConfig.URL.URL != nil{
+		c.LokiConfig.RegisterFlags(flags)
+	} else if c.ElasticConfig.EsAddress != ""{
+		c.ElasticConfig.RegisterFlags(flags)
+	}
 }
 
 // UnmarshalYAML implement Yaml Unmarshaler
@@ -53,25 +75,8 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		cfg = raw{
 		}
 		cfg = raw{
-			Kind: LokiClient,
-			LokiConfig: loki.LokiConfig{
-				BackoffConfig: util.BackoffConfig{
-					MaxBackoff: loki.MaxBackoff,
-					MaxRetries: loki.MaxRetries,
-					MinBackoff: loki.MinBackoff,
-				},
-				BatchSize: loki.BatchSize,
-				BatchWait: loki.BatchWait,
-				Timeout:   loki.Timeout,
-			},
-			//BackoffConfig: util.BackoffConfig{
-			//	MaxBackoff: MaxBackoff,
-			//	MaxRetries: MaxRetries,
-			//	MinBackoff: MinBackoff,
-			//},
-			//BatchSize: BatchSize,
-			//BatchWait: BatchWait,
-			//Timeout:   Timeout,
+			LokiConfig: loki.DefaultLokiConfig(),
+			ElasticConfig: elastic.DefaultEsClientConfig(),
 		}
 	}
 
@@ -81,4 +86,15 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	*c = Config(cfg)
 	return nil
+}
+
+
+// NewClientFromConfig return the an client according to the config
+func(c *Config)NewClientFromConfig(reg prometheus.Registerer,logger log.Logger)(Client,error){
+	if c.LokiConfig.URL.URL != nil{
+		return loki.New(reg, c.LokiConfig, logger)
+	} else if c.ElasticConfig.EsAddress != ""{
+		return elastic.New(reg, c.ElasticConfig, logger)
+	}
+	return nil, errors.New("NewClientFromConfig error: unknown client type")
 }

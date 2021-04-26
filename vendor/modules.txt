@@ -370,6 +370,7 @@ github.com/edsrzf/mmap-go
 github.com/elastic/go-elasticsearch/v7
 github.com/elastic/go-elasticsearch/v7/esapi
 github.com/elastic/go-elasticsearch/v7/estransport
+github.com/elastic/go-elasticsearch/v7/esutil
 github.com/elastic/go-elasticsearch/v7/internal/version
 # github.com/facette/natsort v0.0.0-20181210072756-2cd4dd1e2dcb
 github.com/facette/natsort
@@ -610,6 +611,8 @@ github.com/jonboulle/clockwork
 # github.com/joncrlsn/dque v2.2.1-0.20200515025108-956d14155fa2+incompatible
 ## explicit
 github.com/joncrlsn/dque
+# github.com/josharian/intern v1.0.0
+github.com/josharian/intern
 # github.com/jpillora/backoff v1.0.0
 github.com/jpillora/backoff
 # github.com/json-iterator/go v1.1.10
@@ -643,7 +646,7 @@ github.com/leodido/ragel-machinery/parser
 github.com/lib/pq
 github.com/lib/pq/oid
 github.com/lib/pq/scram
-# github.com/mailru/easyjson v0.7.1
+# github.com/mailru/easyjson v0.7.7
 github.com/mailru/easyjson/buffer
 github.com/mailru/easyjson/jlexer
 github.com/mailru/easyjson/jwriter
@@ -701,6 +704,8 @@ github.com/ncw/swift
 github.com/oklog/run
 # github.com/oklog/ulid v1.3.1
 github.com/oklog/ulid
+# github.com/olivere/elastic/v7 v7.0.24
+## explicit
 # github.com/opencontainers/go-digest v1.0.0
 github.com/opencontainers/go-digest
 # github.com/opencontainers/image-spec v1.0.1
