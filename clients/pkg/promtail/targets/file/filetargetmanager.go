@@ -3,6 +3,8 @@ package file
 import (
 	"context"
 	"fmt"
+	util2 "github.com/grafana/loki/clients/pkg/promtail/util"
+	"github.com/sirupsen/logrus"
 	"os"
 	"strings"
 	"sync"
@@ -32,6 +34,38 @@ const (
 	kubernetesPodNodeField = "spec.nodeName"
 )
 
+
+// custom label
+
+// copy from prometheus
+const (
+	// from prometheus.discovery.kubernetes
+	metaLabelPrefix  = model.MetaLabelPrefix + "kubernetes_"
+	namespaceLabel   = metaLabelPrefix + "namespace"
+	metricsNamespace = "prometheus_sd_kubernetes"
+	presentValue     = model.LabelValue("true")
+	// from prometheus.discovery.kubernetes.pod
+	podNameLabel                  = metaLabelPrefix + "pod_name"
+	podIPLabel                    = metaLabelPrefix + "pod_ip"
+	podContainerNameLabel         = metaLabelPrefix + "pod_container_name"
+	podContainerPortNameLabel     = metaLabelPrefix + "pod_container_port_name"
+	podContainerPortNumberLabel   = metaLabelPrefix + "pod_container_port_number"
+	podContainerPortProtocolLabel = metaLabelPrefix + "pod_container_port_protocol"
+	podContainerIdLabel = metaLabelPrefix + "pod_container_id"
+	podContainerIsInit            = metaLabelPrefix + "pod_container_init"
+	podReadyLabel                 = metaLabelPrefix + "pod_ready"
+	podPhaseLabel                 = metaLabelPrefix + "pod_phase"
+	podLabelPrefix                = metaLabelPrefix + "pod_label_"
+	podLabelPresentPrefix         = metaLabelPrefix + "pod_labelpresent_"
+	podAnnotationPrefix           = metaLabelPrefix + "pod_annotation_"
+	podAnnotationPresentPrefix    = metaLabelPrefix + "pod_annotationpresent_"
+	podNodeNameLabel              = metaLabelPrefix + "pod_node_name"
+	podHostIPLabel                = metaLabelPrefix + "pod_host_ip"
+	podUID                        = metaLabelPrefix + "pod_uid"
+	podControllerKind             = metaLabelPrefix + "pod_controller_kind"
+	podControllerName             = metaLabelPrefix + "pod_controller_name"
+)
+
 // FileTargetManager manages a set of targets.
 // nolint:golint
 type FileTargetManager struct {
@@ -49,6 +83,7 @@ func NewFileTargetManager(
 	client api.EntryHandler,
 	scrapeConfigs []scrapeconfig.Config,
 	targetConfig *Config,
+	docker *util2.DockerClient,
 ) (*FileTargetManager, error) {
 	reg := metrics.reg
 	if reg == nil {
@@ -91,6 +126,8 @@ func NewFileTargetManager(
 				}
 			}
 		}
+		// debug for template
+		hostname = "minikube"
 
 		// Add an additional api-level node filtering, so we only fetch pod metadata for
 		// all the pods from the current node. Without this filtering we will have to
@@ -114,6 +151,7 @@ func NewFileTargetManager(
 			hostname:       hostname,
 			entryHandler:   pipeline.Wrap(client),
 			targetConfig:   targetConfig,
+			docker: docker,
 		}
 		tm.syncers[cfg.JobName] = s
 		configs[cfg.JobName] = cfg.ServiceDiscoveryConfig.Configs()
@@ -186,6 +224,9 @@ type targetSyncer struct {
 
 	relabelConfig []*relabel.Config
 	targetConfig  *Config
+
+	// docker
+	docker *util2.DockerClient
 }
 
 // sync synchronize target based on received target groups received by service discovery
@@ -200,6 +241,7 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 		for _, t := range group.Targets {
 			level.Debug(s.log).Log("msg", "new target", "labels", t)
 
+
 			discoveredLabels := group.Labels.Merge(t)
 			var labelMap = make(map[string]string)
 			for k, v := range discoveredLabels.Clone() {
@@ -212,6 +254,7 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 			for k, v := range processedLabels.Map() {
 				labels[model.LabelName(k)] = model.LabelValue(v)
 			}
+
 
 			// Drop empty targets (drop in relabeling).
 			if processedLabels == nil {
@@ -236,6 +279,24 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 				s.metrics.failedTargets.WithLabelValues("no_path").Inc()
 				continue
 			}
+			// 检测是否是k8s， 既是否包含podcontanerid的标签
+			containerId, ok := labels[podContainerIdLabel]
+			if ok {
+				// 确认来自k8s
+				diffPath,err := s.docker.GraphDriverUpperDir(string(containerId))
+				if err != nil{
+					level.Error(s.log).Log("msg", "get pod'volume in hostpath failed ", "err", err.Error())
+
+					goto CONTINUE
+				}
+				volume,err := s.docker.Volumes(string(containerId))
+				if err != nil {
+					logrus.Errorf("pod has no volume config")
+					goto CONTINUE
+				}
+				path = model.LabelValue(diffPath + volume + "/*.log")
+			}
+			CONTINUE:
 
 			for k := range labels {
 				if strings.HasPrefix(string(k), "__") {

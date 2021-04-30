@@ -83,6 +83,7 @@ func NewFileTarget(
 	}
 
 	t := &FileTarget{
+
 		logger:           logger,
 		metrics:          metrics,
 		watcher:          watcher,

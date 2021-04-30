@@ -24,6 +24,7 @@ type MultiClient struct {
 	entries chan api.Entry
 	wg      sync.WaitGroup
 
+
 	once sync.Once
 }
 

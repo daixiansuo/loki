@@ -2,7 +2,9 @@ package promtail
 
 import (
 	"github.com/grafana/loki/clients/pkg/promtail/client"
+	"github.com/grafana/loki/clients/pkg/promtail/util"
 	"github.com/grafana/loki/pkg/util/flagext"
+	"github.com/sirupsen/logrus"
 	"sync"
 
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
@@ -41,6 +43,8 @@ type Promtail struct {
 	logger         log.Logger
 	reg            prometheus.Registerer
 
+	docker *util.DockerClient
+
 	stopped bool
 	mtx     sync.Mutex
 }
@@ -56,6 +60,15 @@ func New(cfg config.Config, dryRun bool, opts ...Option) (*Promtail, error) {
 	for _, o := range opts {
 		o(promtail)
 	}
+
+	// 开始创建docker
+	docker := util.NewDockerClient()
+	if err := docker.Ping(); err != nil {
+		logrus.Errorf("new docker, but check docker api reached able failed")
+		return nil, err
+	}
+	promtail.docker = docker
+
 
 	if cfg.ClientConfig.LokiConfig.URL.URL != nil {
 		// if a single client config is used we add it to the multiple client config for backward compatibility
@@ -85,7 +98,7 @@ func New(cfg config.Config, dryRun bool, opts ...Option) (*Promtail, error) {
 		}
 	}
 
-	tms, err := targets.NewTargetManagers(promtail, promtail.reg, promtail.logger, cfg.PositionsConfig, promtail.client, cfg.ScrapeConfig, &cfg.TargetConfig)
+	tms, err := targets.NewTargetManagers(promtail, promtail.reg, promtail.logger, cfg.PositionsConfig, promtail.client, cfg.ScrapeConfig, &cfg.TargetConfig, docker)
 	if err != nil {
 		return nil, err
 	}

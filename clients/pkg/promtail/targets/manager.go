@@ -3,6 +3,7 @@ package targets
 import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/grafana/loki/clients/pkg/promtail/util"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -50,6 +51,7 @@ func NewTargetManagers(
 	client api.EntryHandler,
 	scrapeConfigs []scrapeconfig.Config,
 	targetConfig *file.Config,
+	docker *util.DockerClient,
 ) (*TargetManagers, error) {
 	var targetManagers []targetManager
 	targetScrapeConfigs := make(map[string][]scrapeconfig.Config, 4)
@@ -127,6 +129,7 @@ func NewTargetManagers(
 				client,
 				scrapeConfigs,
 				targetConfig,
+				docker,
 			)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to make file target manager")

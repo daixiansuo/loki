@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/version"
 	"github.com/weaveworks/common/logging"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog"
 	"os"
 	"reflect"
@@ -56,6 +57,11 @@ func (c *Config) Clone() flagext.Registerer {
 	return func(c Config) *Config {
 		return &c
 	}(*c)
+}
+
+
+func demo(){
+	_,_ = clientcmd.BuildConfigFromFlags("", "")
 }
 
 

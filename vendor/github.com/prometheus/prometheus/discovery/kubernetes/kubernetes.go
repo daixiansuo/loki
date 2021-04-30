@@ -16,6 +16,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/tools/clientcmd"
 	"reflect"
 	"strings"
 	"sync"
@@ -249,6 +250,7 @@ func (d *Discovery) getNamespaces() []string {
 
 // New creates a new Kubernetes discovery for the given role.
 func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
+
 	if l == nil {
 		l = log.NewNopLogger()
 	}
@@ -259,7 +261,8 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 	if conf.APIServer.URL == nil {
 		// Use the Kubernetes provided pod service account
 		// as described in https://kubernetes.io/docs/admin/service-accounts-admin/
-		kcfg, err = rest.InClusterConfig()
+		//kcfg, err = rest.InClusterConfig()
+		kcfg,err = clientcmd.BuildConfigFromFlags("", "/Users/edz/.kube/config")
 		if err != nil {
 			return nil, err
 		}

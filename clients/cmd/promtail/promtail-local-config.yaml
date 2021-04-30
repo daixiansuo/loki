@@ -7,12 +7,8 @@ positions:
 
 # 除了client的配置文件需要包装一层，其他的配置用法不变
 clients:    # 客户端在原来基础上包一层
-- es_config:   # 客户端是elastic
-    url: "http://localhost:9200"
-    batch_size: 1000                # 一次bulk的条目数，不指定默认1000条
-- loki:       #客户端是Loki， loki下面的配置和官方的保持一致
-    url: "http://127.0.0.1:3000"    # required
-
+- file_system_config:       #客户端是Loki， loki下面的配置和官方的保持一致
+    path: "/tmp/promtail/log"
 
 
 scrape_configs:
@@ -22,4 +18,4 @@ scrape_configs:
       - localhost
     labels:
       job: varlogs
-      __path__: /tmp/*.log
+      __path__: /tmp/log/*.log
