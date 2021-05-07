@@ -4,12 +4,11 @@ import (
 	"flag"
 	"github.com/go-kit/kit/log"
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/grafana/loki/clients/pkg/promtail/client/elastic"
 	"github.com/grafana/loki/clients/pkg/promtail/client/filesystem"
+	"github.com/grafana/loki/clients/pkg/promtail/client/kafka"
 	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
-
 )
 
 type Client interface {
@@ -18,14 +17,13 @@ type Client interface {
 	StopNow()
 }
 
-
 type ClientKind string
-const (
-	ElasticSearchClient ClientKind = "elasticsearch"
-	LokiClient ClientKind = "loki"
-	FileClient ClientKind = "file-system"
-)
 
+const (
+	KafkaClient ClientKind = "kafka"
+	LokiClient  ClientKind = "loki"
+	FileClient  ClientKind = "file-system"
+)
 
 type RunnerAble interface {
 	api.EntryHandler
@@ -35,13 +33,12 @@ type RunnerAble interface {
 
 // NOTE the helm chart for promtail and fluent-bit also have defaults for these values, please update to match if you make changes here.
 
-
 // Config describes configuration for a HTTP pusher client.
 type Config struct {
 	// lokiconfig
 	LokiConfig loki.LokiConfig `yaml:"loki"`
-	// elasticsearch'
-	ElasticConfig elastic.EsClientConfig `yaml:"es_config"`
+	// kafka
+	KafkaConfig kafka.KafkaConfig `yaml:"kafka"`
 	// file system config
 	FileSystemClient filesystem.FileClientConfig `yaml:"file_system_config"`
 }
@@ -49,11 +46,9 @@ type Config struct {
 // RegisterFlags with prefix registers flags where every name is prefixed by
 // prefix. If prefix is a non-empty string, prefix should end with a period.
 func (c *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
-	if c.LokiConfig.URL.URL != nil{
+	if c.LokiConfig.URL.URL != nil {
 		c.LokiConfig.RegisterFlagsWithPrefix(prefix, f)
-	}else if c.ElasticConfig.EsAddress != ""{
-		c.ElasticConfig.RegisterFlagsWithPrefix(prefix, f)
-	} else if c.FileSystemClient.Path != ""{
+	} else if c.FileSystemClient.Path != "" {
 		c.FileSystemClient.RegisterFlagsWithPrefix(prefix, f)
 	}
 
@@ -61,11 +56,9 @@ func (c *Config) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 
 // RegisterFlags registers flags.
 func (c *Config) RegisterFlags(flags *flag.FlagSet) {
-	if c.LokiConfig.URL.URL != nil{
+	if c.LokiConfig.URL.URL != nil {
 		c.LokiConfig.RegisterFlags(flags)
-	} else if c.ElasticConfig.EsAddress != ""{
-		c.ElasticConfig.RegisterFlags(flags)
-	} else if c.FileSystemClient.Path != ""{
+	} else if c.FileSystemClient.Path != "" {
 		c.FileSystemClient.RegisterFlags(flags)
 	}
 }
@@ -81,8 +74,8 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	} else {
 		// force sane defaults.
 		cfg = raw{
-			LokiConfig: loki.DefaultLokiConfig(),
-			ElasticConfig: elastic.DefaultEsClientConfig(),
+			LokiConfig:       loki.DefaultLokiConfig(),
+			KafkaConfig:      kafka.DefaultKafkaConfig(),
 			FileSystemClient: filesystem.DefaultFileSystemConfig(),
 		}
 	}
@@ -95,15 +88,14 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-
 // NewClientFromConfig return the an client according to the config
-func(c *Config)NewClientFromConfig(reg prometheus.Registerer,logger log.Logger)(Client,error){
-	if c.LokiConfig.URL.URL != nil{
+func (c *Config) NewClientFromConfig(reg prometheus.Registerer, logger log.Logger) (Client, error) {
+	if c.LokiConfig.URL.URL != nil {
 		return loki.New(reg, c.LokiConfig, logger)
-	} else if c.ElasticConfig.EsAddress != ""{
-		return elastic.New(reg, c.ElasticConfig, logger)
-	} else if c.FileSystemClient.Path != ""{
+	} else if c.FileSystemClient.Path != "" {
 		return filesystem.NewFileSystemClient(reg, c.FileSystemClient, logger)
+	} else if c.KafkaConfig.Url != "" {
+		return kafka.NewKafkaClient(reg, c.KafkaConfig, logger)
 	}
 	return nil, errors.New("NewClientFromConfig error: unknown client type")
 }

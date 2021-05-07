@@ -3,9 +3,10 @@ package file
 import (
 	"context"
 	"fmt"
-	util2 "github.com/grafana/loki/clients/pkg/promtail/util"
-	"github.com/sirupsen/logrus"
+	"github.com/docker/docker/api/types"
+	dockerutil "github.com/grafana/loki/clients/pkg/promtail/util"
 	"os"
+	"path"
 	"strings"
 	"sync"
 
@@ -34,7 +35,6 @@ const (
 	kubernetesPodNodeField = "spec.nodeName"
 )
 
-
 // custom label
 
 // copy from prometheus
@@ -51,7 +51,7 @@ const (
 	podContainerPortNameLabel     = metaLabelPrefix + "pod_container_port_name"
 	podContainerPortNumberLabel   = metaLabelPrefix + "pod_container_port_number"
 	podContainerPortProtocolLabel = metaLabelPrefix + "pod_container_port_protocol"
-	podContainerIdLabel = metaLabelPrefix + "pod_container_id"
+	podContainerIdLabel           = metaLabelPrefix + "pod_container_id"
 	podContainerIsInit            = metaLabelPrefix + "pod_container_init"
 	podReadyLabel                 = metaLabelPrefix + "pod_ready"
 	podPhaseLabel                 = metaLabelPrefix + "pod_phase"
@@ -83,7 +83,7 @@ func NewFileTargetManager(
 	client api.EntryHandler,
 	scrapeConfigs []scrapeconfig.Config,
 	targetConfig *Config,
-	docker *util2.DockerClient,
+	docker *dockerutil.DockerClient,
 ) (*FileTargetManager, error) {
 	reg := metrics.reg
 	if reg == nil {
@@ -126,8 +126,6 @@ func NewFileTargetManager(
 				}
 			}
 		}
-		// debug for template
-		hostname = "minikube"
 
 		// Add an additional api-level node filtering, so we only fetch pod metadata for
 		// all the pods from the current node. Without this filtering we will have to
@@ -151,7 +149,7 @@ func NewFileTargetManager(
 			hostname:       hostname,
 			entryHandler:   pipeline.Wrap(client),
 			targetConfig:   targetConfig,
-			docker: docker,
+			docker:         docker,
 		}
 		tm.syncers[cfg.JobName] = s
 		configs[cfg.JobName] = cfg.ServiceDiscoveryConfig.Configs()
@@ -226,22 +224,18 @@ type targetSyncer struct {
 	targetConfig  *Config
 
 	// docker
-	docker *util2.DockerClient
+	docker *dockerutil.DockerClient
 }
 
 // sync synchronize target based on received target groups received by service discovery
 func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-
 	targets := map[string]struct{}{}
 	dropped := []target.Target{}
-
 	for _, group := range groups {
 		for _, t := range group.Targets {
 			level.Debug(s.log).Log("msg", "new target", "labels", t)
-
-
 			discoveredLabels := group.Labels.Merge(t)
 			var labelMap = make(map[string]string)
 			for k, v := range discoveredLabels.Clone() {
@@ -255,7 +249,6 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 				labels[model.LabelName(k)] = model.LabelValue(v)
 			}
 
-
 			// Drop empty targets (drop in relabeling).
 			if processedLabels == nil {
 				dropped = append(dropped, target.NewDroppedTarget("dropping target, no labels", discoveredLabels))
@@ -266,37 +259,53 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 
 			host, ok := labels[hostLabel]
 			if ok && string(host) != s.hostname {
+				labels["host"] = host
 				dropped = append(dropped, target.NewDroppedTarget(fmt.Sprintf("ignoring target, wrong host (labels:%s hostname:%s)", labels.String(), s.hostname), discoveredLabels))
 				level.Debug(s.log).Log("msg", "ignoring target, wrong host", "labels", labels.String(), "hostname", s.hostname)
 				s.metrics.failedTargets.WithLabelValues("wrong_host").Inc()
 				continue
 			}
-
-			path, ok := labels[pathLabel]
-			if !ok {
-				dropped = append(dropped, target.NewDroppedTarget("no path for target", discoveredLabels))
-				level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
-				s.metrics.failedTargets.WithLabelValues("no_path").Inc()
-				continue
-			}
-			// 检测是否是k8s， 既是否包含podcontanerid的标签
-			containerId, ok := labels[podContainerIdLabel]
-			if ok {
-				// 确认来自k8s
-				diffPath,err := s.docker.GraphDriverUpperDir(string(containerId))
-				if err != nil{
-					level.Error(s.log).Log("msg", "get pod'volume in hostpath failed ", "err", err.Error())
-
-					goto CONTINUE
+			var (
+				path        model.LabelValue
+				containerId model.LabelValue
+			)
+			if fileBasedDiscovery, ok := labels["file_based_discovery"]; ok && string(fileBasedDiscovery) == "static_configs" {
+				// is base file_based_discovery
+				addressTarget, ok := labels["__address__"]
+				if !ok {
+					dropped = append(dropped, target.NewDroppedTarget("no path for target", discoveredLabels))
+					level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
+					s.metrics.failedTargets.WithLabelValues("no_path").Inc()
+					continue
 				}
-				volume,err := s.docker.Volumes(string(containerId))
-				if err != nil {
-					logrus.Errorf("pod has no volume config")
-					goto CONTINUE
+				hostTargetSplit := strings.Split(string(addressTarget), ":")
+				if len(hostTargetSplit) != 2 {
+					continue
 				}
-				path = model.LabelValue(diffPath + volume + "/*.log")
+				if hostTargetSplit[0] != "*" && hostTargetSplit[0] != s.hostname {
+					continue
+				}
+				path = model.LabelValue(hostTargetSplit[1])
+
+			} else {
+				path, ok = labels[pathLabel]
+				if !ok {
+					dropped = append(dropped, target.NewDroppedTarget("no path for target", discoveredLabels))
+					level.Info(s.log).Log("msg", "no path for target", "labels", labels.String())
+					s.metrics.failedTargets.WithLabelValues("no_path").Inc()
+					continue
+				}
+				// 检测是否是k8s， 既是否包含podcontanerid的标签
+				containerId, ok := labels[podContainerIdLabel]
+				if ok {
+					inspcet, err := s.docker.DockerInspect(string(containerId))
+					if err != nil {
+						level.Error(s.log).Log("msg", "failed get docker inspect information")
+					} else {
+						path = model.LabelValue(getCustomPodLogPathFromDockerInspect(inspcet))
+					}
+				}
 			}
-			CONTINUE:
 
 			for k := range labels {
 				if strings.HasPrefix(string(k), "__") {
@@ -307,10 +316,18 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 			key := labels.String()
 			targets[key] = struct{}{}
 			if _, ok := s.targets[key]; ok {
+				t := s.targets[key]
+				if string(containerId) != "" && strings.Compare(t.preContainerId, string(containerId)) == 0 {
+					dropped = append(dropped, target.NewDroppedTarget("ignoring target, already exists", discoveredLabels))
+					level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labels.String())
+					s.metrics.failedTargets.WithLabelValues("exists").Inc()
+					continue
+				}
+				// pod crashbackoff过一次，当pod crashbackoff的时候drop掉
+				go t.Stop() // if existed ,but container id is different, then stop it, create new one
 				dropped = append(dropped, target.NewDroppedTarget("ignoring target, already exists", discoveredLabels))
-				level.Debug(s.log).Log("msg", "ignoring target, already exists", "labels", labels.String())
-				s.metrics.failedTargets.WithLabelValues("exists").Inc()
-				continue
+				level.Debug(s.log).Log("msg", "ignoring target, already exists ,but pod crash_backoff", "labels", labels.String())
+				delete(s.targets, key)
 			}
 
 			level.Info(s.log).Log("msg", "Adding target", "key", key)
@@ -321,7 +338,7 @@ func (s *targetSyncer) sync(groups []*targetgroup.Group) {
 				s.metrics.failedTargets.WithLabelValues("error").Inc()
 				continue
 			}
-
+			t.preContainerId = string(containerId)
 			s.metrics.targetsActive.Add(1.)
 			s.targets[key] = t
 		}
@@ -388,4 +405,38 @@ func hostname() (string, error) {
 	}
 
 	return os.Hostname()
+}
+
+// getCustomPodLogPathFromDockerInspect get some custom log in pod by combine some hard code with some path get from docker inspect
+func getCustomPodLogPathFromDockerInspect(inspect *types.ContainerJSON) string {
+	// for tomcat about logs is located at docker's data path
+	var (
+		tomcatAccessLog   string = "/usr/local/tomcat/logs/localhost_access_log.log"
+		tomcatCatalinaLog string = "/usr/local/tomcat/logs/catalina.out"
+		jsonAppLog        string = "/root/logs/*/appJson/jsonApp.*.log"
+		accessRestLog     string = "/root/logs/*/access.*.log"
+		accessDubboLog    string = "/root/logs/*/dubboAccess.*.log"
+		mongoLog          string = "/root/logs/*/sql.*.log"
+		gcLog             string = "/root/logs/*/gc.log"
+		javaMemory        string = "/root/logs/*/memory.log"
+		application       string = "/root/logs/*/application.log"
+		appLog            string = "/root/logs/*/app.log"
+	)
+
+	var pathString string = "{" + inspect.LogPath + ","
+	if graphDiff, err := dockerutil.GetDockerDataPath(inspect); err == nil {
+		pathString += path.Join(graphDiff, tomcatCatalinaLog) + "," +
+			path.Join(graphDiff, appLog) + "," +
+			path.Join(graphDiff, tomcatAccessLog) + "," +
+			path.Join(graphDiff, gcLog) + "," +
+			path.Join(graphDiff, jsonAppLog) + "," +
+			path.Join(graphDiff, accessRestLog) + "," +
+			path.Join(graphDiff, accessDubboLog) + "," +
+			path.Join(graphDiff, mongoLog) + "," +
+			path.Join(graphDiff, javaMemory) + "," +
+			path.Join(graphDiff, application) + ","
+	}
+
+	pathString += "}"
+	return pathString
 }

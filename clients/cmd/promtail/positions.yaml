@@ -1,0 +1,22 @@
+positions:
+  ? /var/lib/docker/containers/1cf9c85f526be45746bdd77baf214e7ec80222bf81ebdf2520bdd41d80a89687/1cf9c85f526be45746bdd77baf214e7ec80222bf81ebdf2520bdd41d80a89687-json.log
+  : "1494"
+  ? /var/lib/docker/containers/2ae2f5bd3b138a74a7ab204a3a711d51df45c8d0d26c78b9ba202d5db2643c79/2ae2f5bd3b138a74a7ab204a3a711d51df45c8d0d26c78b9ba202d5db2643c79-json.log
+  : "714999"
+  ? /var/lib/docker/containers/3e1e2ae1777df8f2f4ec52018278c40dac5c9b362e1bca891c9c62c76e1357a9/3e1e2ae1777df8f2f4ec52018278c40dac5c9b362e1bca891c9c62c76e1357a9-json.log
+  : "0"
+  ? /var/lib/docker/containers/152314a0814e432e1cd56b4b2859f182dedf57caf0445ca2307cb80a52261dfb/152314a0814e432e1cd56b4b2859f182dedf57caf0445ca2307cb80a52261dfb-json.log
+  : "3943"
+  ? /var/lib/docker/containers/ce91993e241402b38e52d189bf7666b8f304fdabbdc25f7041f9ad8c18d22086/ce91993e241402b38e52d189bf7666b8f304fdabbdc25f7041f9ad8c18d22086-json.log
+  : "0"
+  ? /var/lib/docker/containers/d860601e05f2753eae91b36876882bab1c0c94ca2bfd1e7ca335a975ced65132/d860601e05f2753eae91b36876882bab1c0c94ca2bfd1e7ca335a975ced65132-json.log
+  : "17673"
+  /var/lib/docker/volumes/1ce066052409ab350472cb0d78a00ea042b0c23b11a70e96f8f8e0ef92321313/_data/gc.log: "9052"
+  /var/lib/docker/volumes/2a60bb8a320bca04475885c7ac599c8ce57cb31092091c4fa96e909ef1e37dfb/_data/app.log: "75723971"
+  /var/lib/docker/volumes/2a60bb8a320bca04475885c7ac599c8ce57cb31092091c4fa96e909ef1e37dfb/_data/gc.log: "1907343"
+  /var/lib/docker/volumes/2a60bb8a320bca04475885c7ac599c8ce57cb31092091c4fa96e909ef1e37dfb/_data/heartbeat.log: "3152"
+  /var/lib/docker/volumes/2d8b0a96caee3476cdd8a76499bfbb7cb7267c6e4f728e22f183dab7218b3a57/_data/app.log: "837378"
+  /var/lib/docker/volumes/2d8b0a96caee3476cdd8a76499bfbb7cb7267c6e4f728e22f183dab7218b3a57/_data/gc.log: "263370"
+  /var/lib/docker/volumes/2d8b0a96caee3476cdd8a76499bfbb7cb7267c6e4f728e22f183dab7218b3a57/_data/heartbeat.log: "6305"
+  /var/lib/docker/volumes/2ed98959b4fcd094f81d897d69f5b2c7c3fb0973017b50fa0c736f038914067d/_data/app.log: "4795199"
+  /var/lib/docker/volumes/2ed98959b4fcd094f81d897d69f5b2c7c3fb0973017b50fa0c736f038914067d/_data/gc.log: "2985"

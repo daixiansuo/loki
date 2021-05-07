@@ -1,21 +1,20 @@
-server:
-  http_listen_port: 9080
-  grpc_listen_port: 0
+clients:
+  - file_system_config:
+      path: /tmp/promtail/log
+#  - kafka:
+#      batch_size: 400000
+#      url: "172.35.88.54:9092"
 
 positions:
   filename: /tmp/positions.yaml
-
-# 除了client的配置文件需要包装一层，其他的配置用法不变
-clients:    # 客户端在原来基础上包一层
-- file_system_config:       #客户端是Loki， loki下面的配置和官方的保持一致
-    path: "/tmp/promtail/log"
-
-
+server:
+  http_listen_port: 43101
+  grpc_listen_port: 49005
+target_config:
+  sync_period: 10s
 scrape_configs:
-- job_name: system
-  static_configs:
-  - targets:
-      - localhost
-    labels:
-      job: varlogs
-      __path__: /tmp/log/*.log
+  - job_name: file_discovery
+    file_sd_configs:
+      - files:
+          - file.json
+        refresh_interval: 10s

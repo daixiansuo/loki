@@ -69,7 +69,6 @@ func New(cfg config.Config, dryRun bool, opts ...Option) (*Promtail, error) {
 	}
 	promtail.docker = docker
 
-
 	if cfg.ClientConfig.LokiConfig.URL.URL != nil {
 		// if a single client config is used we add it to the multiple client config for backward compatibility
 		cfg.ClientConfigs = append(cfg.ClientConfigs, cfg.ClientConfig)

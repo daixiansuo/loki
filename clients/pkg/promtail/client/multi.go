@@ -15,15 +15,11 @@ import (
 	"github.com/grafana/loki/pkg/util/flagext"
 )
 
-
-
-
 // MultiClient is client pushing to one or more loki instances.
 type MultiClient struct {
 	clients []config.Client
 	entries chan api.Entry
 	wg      sync.WaitGroup
-
 
 	once sync.Once
 }
@@ -44,8 +40,8 @@ func NewMulti(reg prometheus.Registerer, logger log.Logger, externalLabels flage
 		// which exist in both the command line arguments as well as the yaml, and while this is
 		// not typically the order of precedence, the assumption here is someone providing a specific config in
 		// yaml is doing so explicitly to make a key specific to a client.
-		client,err := cfg.NewClientFromConfig(reg, logger)
-		if err != nil{
+		client, err := cfg.NewClientFromConfig(reg, logger)
+		if err != nil {
 			level.Error(util_log.Logger).Log("msg", "failed to create client", "err", err.Error())
 		}
 		//client, err := loki.New(reg, cfg.LokiConfig, logger)

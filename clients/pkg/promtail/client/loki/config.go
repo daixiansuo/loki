@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-
 const (
 	BatchWait      = 1 * time.Second
 	BatchSize  int = 1024 * 1024
@@ -19,14 +18,13 @@ const (
 	Timeout        = 10 * time.Second
 )
 
-
 type LokiConfig struct {
-	URL       flagext.URLValue
+	URL flagext.URLValue
 
 	Client config.HTTPClientConfig `yaml:",inline"`
 
-	BatchWait time.Duration
-	BatchSize int
+	BatchWait     time.Duration
+	BatchSize     int
 	BackoffConfig util.BackoffConfig `yaml:"backoff_config"`
 	// The labels to add to any time series or alerts when communicating with loki
 	ExternalLabels lokiflag.LabelSet `yaml:"external_labels,omitempty"`
@@ -37,7 +35,7 @@ type LokiConfig struct {
 	TenantID string `yaml:"tenant_id"`
 }
 
-func DefaultLokiConfig()LokiConfig{
+func DefaultLokiConfig() LokiConfig {
 	return LokiConfig{
 		BackoffConfig: util.BackoffConfig{
 			MaxBackoff: MaxBackoff,
@@ -64,6 +62,6 @@ func (c *LokiConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSet) {
 	f.StringVar(&c.TenantID, prefix+"client.tenant-id", "", "Tenant ID to use when pushing logs to Loki.")
 }
 
-func(c *LokiConfig)RegisterFlags(flags *flag.FlagSet){
+func (c *LokiConfig) RegisterFlags(flags *flag.FlagSet) {
 
 }

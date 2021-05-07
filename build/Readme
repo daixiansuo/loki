@@ -1,0 +1,11 @@
+# 20220216 
+# 更新promtail,输出applog到kafka,新增加kafka topic
+
+# 20220217
+# kafka 客户端 发送message增加kind参数 kafka.Message{kind: dpeloymentName, value: xxx , topic: xxx}
+
+# 20220221
+# gc.log 位置更改 /root/logs/xxx/gc.log
+
+# 20220315
+# 增加appjson日志处理 appjson里面日志原封不动当作value直接扔给kafka

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,10 @@ const (
 
 	LatencyLabel = "filename"
 	HostLabel    = "host"
+)
+
+const (
+	ControllerNameLabel model.LabelName = "controller_name"
 )
 
 var UserAgent = fmt.Sprintf("promtail/%s", version.Version)
@@ -134,12 +139,11 @@ func mustRegisterOrGet(reg prometheus.Registerer, c prometheus.Collector) promet
 
 // Client pushes entries to Loki and can be stopped
 
-
 // Client for pushing logs in snappy-compressed protos over HTTP.
 type client struct {
 	metrics *metrics
 	logger  log.Logger
-	cfg    LokiConfig
+	cfg     LokiConfig
 	client  *http.Client
 	entries chan api.Entry
 
@@ -196,6 +200,7 @@ func New(reg prometheus.Registerer, cfg LokiConfig, logger log.Logger) (*client,
 }
 
 func (c *client) run() {
+	level.Info(c.logger).Log("msg", "loki client start running ....")
 	batches := map[string]*batch{}
 
 	// Given the client handles multiple batches (1 per tenant) and each batch
@@ -227,6 +232,10 @@ func (c *client) run() {
 		case e, ok := <-c.entries:
 			// 获取到条目
 			if !ok {
+				return
+			}
+			// 增加过滤，controllername为workflow的时候，才会向Loki发送数据
+			if !c.valid(&e) {
 				return
 			}
 			e, tenantID := c.processEntry(e)
@@ -262,6 +271,18 @@ func (c *client) run() {
 			}
 		}
 	}
+}
+
+// valid add filter when push log to loki
+// if return true ,the entry is valid ,then can be push to loki
+// if return false ,then entry should be dropped
+func (c *client)valid(entry *api.Entry)bool{
+	if dplName, ok := entry.Labels[ControllerNameLabel]; !ok {
+		return false
+	} else {
+		return strings.Contains(string(dplName), "workflow")
+	}
+
 }
 
 func (c *client) Chan() chan<- api.Entry {
@@ -401,6 +422,8 @@ func (c *client) processEntry(e api.Entry) (api.Entry, string) {
 	if len(c.externalLabels) > 0 {
 		e.Labels = c.externalLabels.Merge(e.Labels)
 	}
+	var custom model.LabelSet = map[model.LabelName]model.LabelValue{model.LabelName("test"): model.LabelValue("hh")}
+	e.Labels = custom.Merge(e.Labels)
 	tenantID := c.getTenantID(e.Labels)
 	return e, tenantID
 }

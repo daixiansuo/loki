@@ -1,178 +1,134 @@
 package filesystem
 
 import (
+	"context"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/grafana/loki/clients/pkg/promtail/api"
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"path"
-
+	"os"
 	"sync"
 )
 
 // const label is used for mark directory and filename
-const (
-	// client file is only support k8s
-	NamespaceLabel model.LabelName = "namespace"
+
+var (
+	once sync.Once
+
+	NamespaceLabel      model.LabelName = "namespace"
 	ControllerNameLabel model.LabelName = "controller_name"
-	InstanceLabel model.LabelName = "instance"
+	InstanceLabel       model.LabelName = "instance"
+	FileNameLabel       model.LabelName = "filename"
 
-	defaultNamespace  = "default_namespace"
+	defaultNamespace      = "default"
 	defaultControllerName = "default_controller"
-	defaultInstanceName  = "default_instance"
-
+	defaultInstanceName   = "default_instance"
 )
 
-// metadata 写文件所需要的元数据，group/service/app 拼接目录
-type metadata struct {
-	namespace string
-	controllerName string
-	instance string
-	fileName string
-}
-func(m metadata)Identifier()string{
-	return m.instance+"-"+m.fileName
-}
-func(m metadata)FileName()string{
-	return m.fileName
-}
-func(m metadata)RelativePath()string{
-	return m.namespace + "/" + m.controllerName + "/" + m.instance
+func init(){
+	once.Do(func() {
+		defaultInstanceName, _ = os.Hostname()
+	})
 }
 
-// 文件操作句柄接口
-type Handler interface {
-	// 推出关闭，清理资源
-	close()
-	//  开始运行handler，每个handler都打开一个文件，写文件
-	run()
-	// 从client接收资源
-	Chan()chan <- api.Entry
+type hashedEntries map[string][]string
+func newHashedEntries()*hashedEntries{
+	return &hashedEntries{}
 }
+func(e *hashedEntries)add(entry api.Entry){
+}
+
 
 // client 描述客户端所需要的信息
 type client struct {
-	fpHandlers map[string]Handler
-	cfg FileClientConfig
-	// 增加prometheus的监控
-	reg prometheus.Registerer
-	// 日志记录模块
-	logger log.Logger
+	cfg     FileClientConfig
+	reg     prometheus.Registerer
+	logger  log.Logger
+	entries chan api.Entry // 接收来自client的entry
 
-	wg sync.WaitGroup
-	entries chan api.Entry	// 接收来自client的entry
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	wg   sync.WaitGroup
 	once sync.Once
+
+
+	manager *Manager
 }
 
-
-func NewFileSystemClient(reg prometheus.Registerer, cfg FileClientConfig, logger log.Logger)(*client,error){
+// 文件处理逻辑，handlerId,
+//
+func NewFileSystemClient(reg prometheus.Registerer, cfg FileClientConfig, logger log.Logger) (*client, error) {
 	client := &client{
-		cfg:        cfg,
-		reg:        reg,
-		logger:     log.With(logger, "client_type", "filesystem"),
-		wg:         sync.WaitGroup{},
-		entries:    make(chan api.Entry),
-		once:       sync.Once{},
-		fpHandlers: make(map[string]Handler),
+		cfg:     cfg,
+		reg:     reg,
+		logger:  log.With(logger, "client_type", "filesystem"),
+		entries: make(chan api.Entry),
+		wg:      sync.WaitGroup{},
+		once:    sync.Once{},
+		manager: newHandlerManager(),
 	}
+	client.ctx, client.cancel = context.WithCancel(context.Background())
+	// run client main loop
 	client.wg.Add(1)
-	go client.run(reg, cfg, logger)
+	go client.run()
 	return client, nil
 }
 
 // run function dispatch entry to all relative file handler
-func(c *client)run(reg prometheus.Registerer, cfg FileClientConfig, logger log.Logger){
+func (c *client) run() {
 	defer c.wg.Done()
-
-	for {
-		e, ok := <- c.entries
-		if !ok {
-			continue
-		}
-
-		metadata,err := generateMetadata(&e)
-		if err != nil{
-			level.Error(c.logger).Log("msg", "get metadata failed", "err", err.Error())
-			continue
-		}
-
-		// 检测对应的handler是否存在，不存在则创建一个新的handler
-		handler, ok := c.fpHandlers[metadata.Identifier()]
-		if !ok {
-
-			handler,err = newHandler(reg, cfg, logger, metadata)
-			if err != nil{
-				level.Error(c.logger).Log("msg", "generate newhandler failed", "err", err.Error())
-				continue
-			}
-			c.fpHandlers[metadata.Identifier()] = handler
-			level.Debug(c.logger).Log("msg", "register handler successfully", "id", metadata.instance)
-		}
-		if handler == nil{
-			continue
-		}
-		handler.Chan() <- e
+	level.Info(c.logger).Log("msg", "filesystem client start running...")
+	for e := range c.entries {
+		c.send(&e)
 	}
 }
-// 接收数据
+
+func (c *client) send(e *api.Entry) {
+	defer func() {
+		if r := recover(); r != nil {
+			level.Error(c.logger).Log("msg", "send accrue an panic error", "err", r)
+		}
+	}()
+	md := Get()
+	err := parseEntry(e, md)
+	if err != nil {
+		level.Error(c.logger).Log("msg", "get metadata failed", "err", err.Error())
+		return
+	}
+	handler := c.manager.Get(md.HandlerId())
+	if handler == nil {
+		handler, err = newFileHandler(c.ctx, c.logger, md.HandlerId(), md.BasePathFmt(c.cfg.Path), md.FileName(), c.manager)
+		if err != nil {
+			level.Error(c.logger).Log("msg", "generate new handler failed", "err", err.Error())
+			return
+		}
+		if err = c.manager.Register(md.HandlerId(), handler); err != nil {
+			level.Error(c.logger).Log("msg", "register failed", "err", err.Error())
+		} else {
+			level.Info(c.logger).Log("handler register successfully", handler, "id", md.HandlerId())
+		}
+	}
+	Put(md)
+	handler.Receiver() <- e.Line
+}
+
 func (c *client) Chan() chan<- api.Entry {
 	return c.entries
 }
-// 暂停
+
 func (c *client) Stop() {
 	c.once.Do(func() {
 		close(c.entries)
-		for _, handler := range c.fpHandlers{
-			handler.close()
-		}
+		c.cancel()
 	})
+	if err := c.manager.AwaitComplete();err != nil{
+		// todo log
+	}
 	c.wg.Wait()
 }
 
-// 立即停止
 func (c *client) StopNow() {
 	c.Stop()
-}
-
-//根据label生成元数据
-func generateMetadata(entry *api.Entry)(metadata, error){
-	var (
-		namespace string
-		instance string
-		controllerName string
-		fileName string
-	)
-	if value,ok := entry.Labels[NamespaceLabel]; ok {
-		namespace = string(value)
-	} else {
-		namespace = defaultNamespace
-	}
-	if value, ok := entry.Labels[ControllerNameLabel]; ok {
-		controllerName = string(value)
-	} else {
-		controllerName = defaultControllerName
-	}
-	if value, ok := entry.Labels[InstanceLabel]; ok {
-		instance = string(value)
-	} else {
-		instance = defaultInstanceName
-	}
-	if value, ok := entry.Labels[model.LabelName("filename")]; ok {
-		fileName = getFileBaseName(string(value))
-	} else {
-		return metadata{}, errors.New("path label must be existed")
-	}
-	return metadata{
-		namespace:      namespace,
-		controllerName: controllerName,
-		instance:       instance,
-		fileName: fileName,
-	}, nil
-}
-
-
-func getFileBaseName(fileName string)string{
-	return path.Base(fileName)
 }

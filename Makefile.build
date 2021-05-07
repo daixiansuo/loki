@@ -1,0 +1,4 @@
+ProjectPath=$(shell pwd)
+# docker command
+DOCKER="docker"
+

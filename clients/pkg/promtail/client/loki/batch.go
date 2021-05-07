@@ -36,7 +36,6 @@ func newBatch(entries ...api.Entry) *batch {
 	for _, entry := range entries {
 		b.add(entry)
 	}
-
 	return b
 }
 

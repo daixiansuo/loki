@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
+	"path"
 	"reflect"
 	"strings"
 	"sync"
@@ -261,8 +263,21 @@ func New(l log.Logger, conf *SDConfig) (*Discovery, error) {
 	if conf.APIServer.URL == nil {
 		// Use the Kubernetes provided pod service account
 		// as described in https://kubernetes.io/docs/admin/service-accounts-admin/
-		//kcfg, err = rest.InClusterConfig()
-		kcfg,err = clientcmd.BuildConfigFromFlags("", "/Users/edz/.kube/config")
+		kcfg, err = rest.InClusterConfig()
+		if err != nil {
+			level.Error(l).Log("msg", "build inCluterConfig failed, retry in outcluster mode ")
+			if home := homedir.HomeDir();home!= ""{
+				kcfg,err = clientcmd.BuildConfigFromFlags("", path.Join(home, ".kube", "config"))
+				if err != nil{
+					level.Error(l).Log("msg", "build config with kubeconfig failed", "err", err)
+					return nil, err
+				}
+			} else {
+				level.Error(l).Log("msg", "build config with kubeConfig failed (get home dir failed)", "err", err)
+				return nil, err
+			}
+		}
+		//kcfg,err = clientcmd.BuildConfigFromFlags("", "/Users/l0calh0st/.kube/config")
 		if err != nil {
 			return nil, err
 		}

@@ -55,7 +55,7 @@ func TestNewMulti(t *testing.T) {
 	actualCfg1 := clients.(*MultiClient).clients[0].(*loki.client).cfg
 	// Yaml should overried the command line so 'order: yaml' should be expected
 	expectedCfg1 := config.Config{
-		Kind: config.LokiClient,
+		Kind:           config.LokiClient,
 		BatchSize:      20,
 		BatchWait:      1 * time.Second,
 		URL:            flagext.URLValue{URL: host1},
@@ -69,7 +69,7 @@ func TestNewMulti(t *testing.T) {
 	actualCfg2 := clients.(*MultiClient).clients[1].(*loki.client).cfg
 	// No overlapping label keys so both should be in the output
 	expectedCfg2 := config.Config{
-		Kind: config.LokiClient,
+		Kind:      config.LokiClient,
 		BatchSize: 10,
 		BatchWait: 1 * time.Second,
 		URL:       flagext.URLValue{URL: host2},

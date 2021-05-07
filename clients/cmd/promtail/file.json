@@ -1,0 +1,10 @@
+[
+    {
+        "labels": {
+            "file_based_discovery": "static_configs"
+        },
+        "targets": [
+            "*:/tmp/logs/*.log"
+        ]
+    }
+]

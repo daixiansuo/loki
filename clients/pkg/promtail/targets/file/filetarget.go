@@ -63,6 +63,9 @@ type FileTarget struct {
 	tails map[string]*tailer
 
 	targetConfig *Config
+
+	// 当pod crashbackoff的时候pod的名称不变，导致
+	preContainerId string
 }
 
 // NewFileTarget create a new FileTarget.
@@ -162,7 +165,7 @@ func (t *FileTarget) run() {
 			case fsnotify.Create:
 				matched, err := doublestar.Match(t.path, event.Name)
 				if err != nil {
-					level.Error(t.logger).Log("msg", "failed to match file", "error", err, "filename", event.Name)
+					level.Error(t.logger).Log("msg", "failed to match file", "error", err, "pattern",t.path, "name", event.Name)
 					continue
 				}
 				if !matched {

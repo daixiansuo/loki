@@ -49,17 +49,16 @@ func Test_Config(t *testing.T) {
 			Config{
 				Kind: LokiClient,
 				LokiConfig: loki.LokiConfig{
-					URL:            flagext.URLValue{URL:u},
-					BatchWait:      5 * time.Second,
-					BatchSize:      100 * 2048,
-					BackoffConfig:  util.BackoffConfig{
+					URL:       flagext.URLValue{URL: u},
+					BatchWait: 5 * time.Second,
+					BatchSize: 100 * 2048,
+					BackoffConfig: util.BackoffConfig{
 						MaxRetries: 20,
 						MaxBackoff: 1 * time.Minute,
 						MinBackoff: 5 * time.Second,
 					},
 					ExternalLabels: fe.LabelSet{},
 					Timeout:        5 * time.Second,
-
 				},
 			},
 		},
