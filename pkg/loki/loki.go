@@ -51,27 +51,42 @@ import (
 
 // Config is the root config for Loki.
 type Config struct {
+	// Loki运行模式，all(运行所有的组建),distributor,ingester,querier, query-frontend table-manager
 	Target      string `yaml:"target,omitempty"`
+	// 允许使用 X-Scope-OrgID 头部来作为认证信息
 	AuthEnabled bool   `yaml:"auth_enabled,omitempty"`
+	// api route前缀
 	HTTPPrefix  string `yaml:"http_prefix"`
-
+	// 配置server launched module
 	Server           server.Config               `yaml:"server,omitempty"`
+	// 配置distributor
 	Distributor      distributor.Config          `yaml:"distributor,omitempty"`
+	// 配置query
 	Querier          querier.Config              `yaml:"querier,omitempty"`
+	// 配置distribute如何和ingesters进行通信
 	IngesterClient   client.Config               `yaml:"ingester_client,omitempty"`
+	// 配置ingester， 以及ingrster如何将自身注册到 kv存储里面的。
 	Ingester         ingester.Config             `yaml:"ingester,omitempty"`
+	// 配置Loki将数据存储到哪儿
 	StorageConfig    storage.Config              `yaml:"storage_config,omitempty"`
+	// 配置Loki如何将数据存储到指定的存储里面
 	ChunkStoreConfig storage.ChunkStoreConfig    `yaml:"chunk_store_config,omitempty"`
+	// 配置chunk 索引的结构，以及存储在哪儿
 	SchemaConfig     storage.SchemaConfig        `yaml:"schema_config,omitempty"`
+	// 配置每个租户的限制或者全局的限制
 	LimitsConfig     validation.Limits           `yaml:"limits_config,omitempty"`
+	// tablemanager 保留策略
 	TableManager     chunk.TableManagerConfig    `yaml:"table_manager,omitempty"`
+	//
 	Worker           worker.Config               `yaml:"frontend_worker,omitempty"`
 	Frontend         lokifrontend.Config         `yaml:"frontend,omitempty"`
+	// ruler
 	Ruler            ruler.Config                `yaml:"ruler,omitempty"`
 	QueryRange       queryrange.Config           `yaml:"query_range,omitempty"`
 	RuntimeConfig    runtimeconfig.ManagerConfig `yaml:"runtime_config,omitempty"`
 	MemberlistKV     memberlist.KVConfig         `yaml:"memberlist"`
 	Tracing          tracing.Config              `yaml:"tracing"`
+	// 压缩策略
 	CompactorConfig  compactor.Config            `yaml:"compactor,omitempty"`
 }
 

@@ -28,9 +28,14 @@ func init() {
 
 type Config struct {
 	loki.Config     `yaml:",inline"`
+	//
 	printVersion    bool
 	verifyConfig    bool
+	// 通过参数-print-config-stderr
+	// 将Loki的配置文件完整的输出到stderr里面
 	printConfig     bool
+	// 通过参数-log-config-reverse-order 来控制的
+	// 将配置文件输出到日志里面，在日志是info级别的
 	logConfig       bool
 	configFile      string
 	configExpandEnv bool
@@ -107,6 +112,7 @@ func main() {
 	}
 
 	if config.Tracing.Enabled {
+		// 配置链路追踪
 		// Setting the environment variable JAEGER_AGENT_HOST enables tracing
 		trace, err := tracing.NewFromEnv(fmt.Sprintf("loki-%s", config.Target))
 		if err != nil {
