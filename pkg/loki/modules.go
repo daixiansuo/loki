@@ -86,6 +86,7 @@ func (t *Loki) initServer() (services.Service, error) {
 		return nil, err
 	}
 
+
 	t.Server = serv
 
 	servicesToWaitFor := func() []services.Service {

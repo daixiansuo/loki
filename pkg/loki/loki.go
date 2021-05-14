@@ -83,6 +83,7 @@ type Config struct {
 	// ruler
 	Ruler            ruler.Config                `yaml:"ruler,omitempty"`
 	QueryRange       queryrange.Config           `yaml:"query_range,omitempty"`
+	// 运行时的配置文件
 	RuntimeConfig    runtimeconfig.ManagerConfig `yaml:"runtime_config,omitempty"`
 	MemberlistKV     memberlist.KVConfig         `yaml:"memberlist"`
 	Tracing          tracing.Config              `yaml:"tracing"`
@@ -199,8 +200,10 @@ func New(cfg Config) (*Loki, error) {
 	loki := &Loki{
 		Cfg: cfg,
 	}
-
+	//  设置认证中间件
 	loki.setupAuthMiddleware()
+
+	// 注册模块，添加依赖，类似启动之前准备工作
 	if err := loki.setupModuleManager(); err != nil {
 		return nil, err
 	}
@@ -369,8 +372,9 @@ func (t *Loki) readyHandler(sm *services.Manager) http.HandlerFunc {
 
 func (t *Loki) setupModuleManager() error {
 	mm := modules.NewManager()
-
+	// 注册http服务
 	mm.RegisterModule(Server, t.initServer)
+	// merger
 	mm.RegisterModule(RuntimeConfig, t.initRuntimeConfig)
 	mm.RegisterModule(MemberlistKV, t.initMemberlistKV)
 	mm.RegisterModule(Ring, t.initRing)
