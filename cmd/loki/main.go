@@ -124,7 +124,6 @@ func main() {
 					level.Error(util_log.Logger).Log("msg", "error closing tracing", "err", err)
 				}
 			}
-
 		}()
 	}
 

@@ -3,6 +3,7 @@ package distributor
 import (
 	"context"
 	"flag"
+	"github.com/sirupsen/logrus"
 	"net/http"
 	"time"
 
@@ -79,24 +80,30 @@ type Distributor struct {
 
 // New a distributor creates.
 func New(cfg Config, clientCfg client.Config, configs *runtime.TenantConfigs, ingestersRing ring.ReadRing, overrides *validation.Overrides, registerer prometheus.Registerer) (*Distributor, error) {
+	// distributor 主要做以下几件事情
+	// 1. validation 做进来的数据做校验(prometheus label是否合法，
+	// cfg distributor 自身的配置， clientCfg ingester的配置(这个描述怎么和ingester通信)
 	factory := cfg.factory
 	if factory == nil {
+		// 生成ingester client
 		factory = func(addr string) (ring_client.PoolClient, error) {
 			return client.New(clientCfg, addr)
 		}
 	}
-
+	// 创建validator 校验策略
 	validator, err := NewValidator(overrides)
 	if err != nil {
 		return nil, err
 	}
 
 	// Create the configured ingestion rate limit strategy (local or global).
+	// 创建限速策略
 	var ingestionRateStrategy limiter.RateLimiterStrategy
 	var distributorsRing *ring.Lifecycler
 
 	var servs []services.Service
 
+	// 配置限速策略
 	if overrides.IngestionRateStrategy() == validation.GlobalIngestionRateStrategy {
 		var err error
 		distributorsRing, err = ring.NewLifecycler(cfg.DistributorRing.ToLifecyclerConfig(), nil, "distributor", ring.DistributorRingKey, false, registerer)
@@ -190,6 +197,7 @@ type pushTracker struct {
 
 // Push a set of streams.
 func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*logproto.PushResponse, error) {
+	logrus.Infof("[Distribute-194]: Receive message is %v", req.String())
 	userID, err := user.ExtractOrgID(ctx)
 	if err != nil {
 		return nil, err

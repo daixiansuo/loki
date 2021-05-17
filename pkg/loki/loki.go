@@ -202,13 +202,13 @@ func New(cfg Config) (*Loki, error) {
 	}
 	//  设置认证中间件
 	loki.setupAuthMiddleware()
-
-	// 注册模块，添加依赖，类似启动之前准备工作
+	// 注册模块/ 组织依赖 /服务相关
 	if err := loki.setupModuleManager(); err != nil {
 		return nil, err
 	}
-	storage.RegisterCustomIndexClients(&loki.Cfg.StorageConfig, prometheus.DefaultRegisterer)
 
+	// 存储相关
+	storage.RegisterCustomIndexClients(&loki.Cfg.StorageConfig, prometheus.DefaultRegisterer)
 	return loki, nil
 }
 
@@ -249,11 +249,12 @@ func newDefaultConfig() *Config {
 
 // Run starts Loki running, and blocks until a Loki stops.
 func (t *Loki) Run() error {
+	// 根据配置文件的target来初始化应该需要启动哪些组件的(依赖关系提前准备好)----model -> service 映射
+	// 并且启动service
 	serviceMap, err := t.ModuleManager.InitModuleServices(t.Cfg.Target)
 	if err != nil {
 		return err
 	}
-
 	t.serviceMap = serviceMap
 	t.Server.HTTP.Handle("/services", http.HandlerFunc(t.servicesHandler))
 
@@ -373,6 +374,7 @@ func (t *Loki) readyHandler(sm *services.Manager) http.HandlerFunc {
 func (t *Loki) setupModuleManager() error {
 	mm := modules.NewManager()
 	// 注册http服务
+	// 效果等同于 mm[Server] = &model{initFun: t.initServer}
 	mm.RegisterModule(Server, t.initServer)
 	// merger
 	mm.RegisterModule(RuntimeConfig, t.initRuntimeConfig)
@@ -408,6 +410,7 @@ func (t *Loki) setupModuleManager() error {
 		IngesterQuerier: {Ring},
 		All:             {Querier, Ingester, Distributor, TableManager, Ruler},
 	}
+	// All 启动顺序Query, Store, Overrides,
 
 	// Add IngesterQuerier as a dependency for store when target is either ingester or querier.
 	if t.Cfg.Target == Querier || t.Cfg.Target == Ruler {
@@ -420,6 +423,7 @@ func (t *Loki) setupModuleManager() error {
 		deps[All] = append(deps[All], Compactor)
 	}
 
+	// 添加依赖
 	for mod, targets := range deps {
 		if err := mm.AddDependency(mod, targets...); err != nil {
 			return err

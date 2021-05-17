@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -86,7 +87,6 @@ func (t *Loki) initServer() (services.Service, error) {
 		return nil, err
 	}
 
-
 	t.Server = serv
 
 	servicesToWaitFor := func() []services.Service {
@@ -151,9 +151,12 @@ func (t *Loki) initTenantConfigs() (_ services.Service, err error) {
 }
 
 func (t *Loki) initDistributor() (services.Service, error) {
+
 	t.Cfg.Distributor.DistributorRing.KVStore.Multi.ConfigProvider = multiClientRuntimeConfigChannel(t.runtimeConfig)
 	t.Cfg.Distributor.DistributorRing.KVStore.MemberlistKV = t.memberlistKV.GetMemberlistKV
 	var err error
+	// New(distibutor自身配置文件，IngesterClient的配置, tenantConfig 租户的配置信息， ring hash环的配置)
+	logrus.Infof("debug initDistributor: %v |%v ", t.tenantConfigs, t.ring.State())
 	t.distributor, err = distributor.New(t.Cfg.Distributor, t.Cfg.IngesterClient, t.tenantConfigs, t.ring, t.overrides, prometheus.DefaultRegisterer)
 	if err != nil {
 		return nil, err

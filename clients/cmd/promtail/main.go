@@ -103,7 +103,6 @@ func main() {
 			level.Error(util_log.Logger).Log("msg", "failed to log config object", "err", err.Error())
 		}
 	}
-
 	p, err := promtail.New(config.Config, config.dryRun)
 	if err != nil {
 		level.Error(util_log.Logger).Log("msg", "error creating promtail", "error", err)

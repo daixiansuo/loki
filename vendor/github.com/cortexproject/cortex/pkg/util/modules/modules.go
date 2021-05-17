@@ -68,9 +68,9 @@ func (m *Manager) AddDependency(name string, dependsOn ...string) error {
 // in the right order. Modules are wrapped in such a way that they start after their
 // dependencies have been started and stop before their dependencies are stopped.
 func (m *Manager) InitModuleServices(modules ...string) (map[string]services.Service, error) {
+	// 挨个顺序启动相关服务
 	servicesMap := map[string]services.Service{}
 	initMap := map[string]bool{}
-
 	for _, module := range modules {
 		if err := m.initModule(module, initMap, servicesMap); err != nil {
 			return nil, err
