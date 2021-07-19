@@ -66,7 +66,7 @@ var (
 					RowShards: 16,
 				},
 				{
-					From:       dayFromTime(start.Add(49 * time.Hour)),
+					From:       dayFromTime(start.Add(73 * time.Hour)),
 					IndexType:  "boltdb",
 					ObjectType: "filesystem",
 					Schema:     "v11",
@@ -158,15 +158,26 @@ func (t *testStore) indexTables() []table {
 }
 
 func (t *testStore) HasChunk(c chunk.Chunk) bool {
+	chunks := t.GetChunks(c.UserID, c.From, c.Through, c.Metric)
+
+	chunkIDs := make(map[string]struct{})
+	for _, chk := range chunks {
+		chunkIDs[chk.ExternalKey()] = struct{}{}
+	}
+	return len(chunkIDs) == 1 && c.ExternalKey() == chunks[0].ExternalKey()
+}
+
+func (t *testStore) GetChunks(userID string, from, through model.Time, metric labels.Labels) []chunk.Chunk {
 	t.t.Helper()
 	var matchers []*labels.Matcher
-	for _, l := range c.Metric {
+	for _, l := range metric {
 		matchers = append(matchers, labels.MustNewMatcher(labels.MatchEqual, l.Name, l.Value))
 	}
-	chunks, err := t.Store.Get(user.InjectOrgID(context.Background(), c.UserID),
-		c.UserID, c.From, c.Through, matchers...)
+	chunks, err := t.Store.Get(user.InjectOrgID(context.Background(), userID),
+		userID, from, through, matchers...)
 	require.NoError(t.t, err)
-	return len(chunks) == 1 && c.ExternalKey() == chunks[0].ExternalKey()
+
+	return chunks
 }
 
 func (t *testStore) open() {

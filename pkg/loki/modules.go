@@ -15,11 +15,6 @@ import (
 	"github.com/cortexproject/cortex/pkg/frontend/transport"
 	"github.com/cortexproject/cortex/pkg/frontend/v1/frontendv1pb"
 
-	"github.com/grafana/loki/pkg/ruler/manager"
-	"github.com/grafana/loki/pkg/runtime"
-	"github.com/grafana/loki/pkg/storage/stores/shipper/compactor"
-	"github.com/grafana/loki/pkg/validation"
-
 	"github.com/cortexproject/cortex/pkg/chunk"
 	"github.com/cortexproject/cortex/pkg/chunk/cache"
 	"github.com/cortexproject/cortex/pkg/chunk/storage"
@@ -49,33 +44,40 @@ import (
 	"github.com/grafana/loki/pkg/querier"
 	"github.com/grafana/loki/pkg/querier/queryrange"
 	"github.com/grafana/loki/pkg/ruler"
+	"github.com/grafana/loki/pkg/runtime"
 	loki_storage "github.com/grafana/loki/pkg/storage"
 	"github.com/grafana/loki/pkg/storage/stores/shipper"
+	"github.com/grafana/loki/pkg/storage/stores/shipper/compactor"
+	"github.com/grafana/loki/pkg/storage/stores/shipper/indexgateway"
+	"github.com/grafana/loki/pkg/storage/stores/shipper/indexgateway/indexgatewaypb"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/uploads"
 	serverutil "github.com/grafana/loki/pkg/util/server"
+	"github.com/grafana/loki/pkg/validation"
 )
 
 const maxChunkAgeForTableManager = 12 * time.Hour
 
 // The various modules that make up Loki.
 const (
-	Ring            string = "ring"
-	RuntimeConfig   string = "runtime-config"
-	Overrides       string = "overrides"
-	TenantConfigs   string = "tenant-configs"
-	Server          string = "server"
-	Distributor     string = "distributor"
-	Ingester        string = "ingester"
-	Querier         string = "querier"
-	IngesterQuerier string = "ingester-querier"
-	QueryFrontend   string = "query-frontend"
-	RulerStorage    string = "ruler-storage"
-	Ruler           string = "ruler"
-	Store           string = "store"
-	TableManager    string = "table-manager"
-	MemberlistKV    string = "memberlist-kv"
-	Compactor       string = "compactor"
-	All             string = "all"
+	Ring                     string = "ring"
+	RuntimeConfig            string = "runtime-config"
+	Overrides                string = "overrides"
+	TenantConfigs            string = "tenant-configs"
+	Server                   string = "server"
+	Distributor              string = "distributor"
+	Ingester                 string = "ingester"
+	Querier                  string = "querier"
+	IngesterQuerier          string = "ingester-querier"
+	QueryFrontend            string = "query-frontend"
+	QueryFrontendTripperware string = "query-frontend-tripperware"
+	RulerStorage             string = "ruler-storage"
+	Ruler                    string = "ruler"
+	Store                    string = "store"
+	TableManager             string = "table-manager"
+	MemberlistKV             string = "memberlist-kv"
+	Compactor                string = "compactor"
+	IndexGateway             string = "index-gateway"
+	All                      string = "all"
 )
 
 func (t *Loki) initServer() (services.Service, error) {
@@ -138,7 +140,7 @@ func (t *Loki) initRuntimeConfig() (services.Service, error) {
 }
 
 func (t *Loki) initOverrides() (_ services.Service, err error) {
-	t.overrides, err = validation.NewOverrides(t.Cfg.LimitsConfig, tenantLimitsFromRuntimeConfig(t.runtimeConfig))
+	t.overrides, err = validation.NewOverrides(t.Cfg.LimitsConfig, newtenantLimitsFromRuntimeConfig(t.runtimeConfig))
 	// overrides are not a service, since they don't have any operational state.
 	return nil, err
 }
@@ -158,7 +160,7 @@ func (t *Loki) initDistributor() (services.Service, error) {
 		return nil, err
 	}
 
-	if t.Cfg.Target != All {
+	if !t.Cfg.isModuleEnabled(All) {
 		logproto.RegisterPusherServer(t.Server.GRPC, t.distributor)
 	}
 
@@ -291,8 +293,8 @@ func (t *Loki) initStore() (_ services.Service, err error) {
 
 	if loki_storage.UsingBoltdbShipper(t.Cfg.SchemaConfig.Configs) {
 		t.Cfg.StorageConfig.BoltDBShipperConfig.IngesterName = t.Cfg.Ingester.LifecyclerConfig.ID
-		switch t.Cfg.Target {
-		case Ingester:
+		switch true {
+		case t.Cfg.isModuleEnabled(Ingester):
 			// We do not want ingester to unnecessarily keep downloading files
 			t.Cfg.StorageConfig.BoltDBShipperConfig.Mode = shipper.ModeWriteOnly
 			// Use fifo cache for caching index in memory.
@@ -308,7 +310,7 @@ func (t *Loki) initStore() (_ services.Service, err error) {
 				},
 			}
 			t.Cfg.StorageConfig.BoltDBShipperConfig.IngesterDBRetainPeriod = boltdbShipperQuerierIndexUpdateDelay(t.Cfg) + 2*time.Minute
-		case Querier, Ruler:
+		case t.Cfg.isModuleEnabled(Querier), t.Cfg.isModuleEnabled(Ruler):
 			// We do not want query to do any updates to index
 			t.Cfg.StorageConfig.BoltDBShipperConfig.Mode = shipper.ModeReadOnly
 		default:
@@ -324,14 +326,18 @@ func (t *Loki) initStore() (_ services.Service, err error) {
 
 	if loki_storage.UsingBoltdbShipper(t.Cfg.SchemaConfig.Configs) {
 		boltdbShipperMinIngesterQueryStoreDuration := boltdbShipperMinIngesterQueryStoreDuration(t.Cfg)
-		switch t.Cfg.Target {
-		case Querier, Ruler:
+		switch true {
+		case t.Cfg.isModuleEnabled(Querier), t.Cfg.isModuleEnabled(Ruler):
+			// Do not use the AsyncStore if the querier is configured with QueryStoreOnly set to true
+			if t.Cfg.Querier.QueryStoreOnly {
+				break
+			}
 			// Use AsyncStore to query both ingesters local store and chunk store for store queries.
 			// Only queriers should use the AsyncStore, it should never be used in ingesters.
 			chunkStore = loki_storage.NewAsyncStore(chunkStore, t.ingesterQuerier,
 				calculateAsyncStoreQueryIngestersWithin(t.Cfg.Querier.QueryIngestersWithin, boltdbShipperMinIngesterQueryStoreDuration),
 			)
-		case All:
+		case t.Cfg.isModuleEnabled(All):
 			// We want ingester to also query the store when using boltdb-shipper but only when running with target All.
 			// We do not want to use AsyncStore otherwise it would start spiraling around doing queries over and over again to the ingesters and store.
 			// ToDo: See if we can avoid doing this when not running loki in clustered mode.
@@ -374,6 +380,26 @@ type disabledShuffleShardingLimits struct{}
 
 func (disabledShuffleShardingLimits) MaxQueriersPerUser(userID string) int { return 0 }
 
+func (t *Loki) initQueryFrontendTripperware() (_ services.Service, err error) {
+	level.Debug(util_log.Logger).Log("msg", "initializing query frontend tripperware")
+
+	tripperware, stopper, err := queryrange.NewTripperware(
+		t.Cfg.QueryRange,
+		util_log.Logger,
+		t.overrides,
+		t.Cfg.SchemaConfig.SchemaConfig,
+		t.Cfg.Querier.QueryIngestersWithin,
+		prometheus.DefaultRegisterer,
+	)
+	if err != nil {
+		return
+	}
+	t.stopper = stopper
+	t.QueryFrontEndTripperware = tripperware
+
+	return services.NewIdleService(nil, nil), nil
+}
+
 func (t *Loki) initQueryFrontend() (_ services.Service, err error) {
 	level.Debug(util_log.Logger).Log("msg", "initializing query frontend", "config", fmt.Sprintf("%+v", t.Cfg.Frontend))
 
@@ -391,27 +417,7 @@ func (t *Loki) initQueryFrontend() (_ services.Service, err error) {
 		frontendv1pb.RegisterFrontendServer(t.Server.GRPC, t.frontend)
 	}
 
-	level.Debug(util_log.Logger).Log("msg", "initializing query range tripperware",
-		"config", fmt.Sprintf("%+v", t.Cfg.QueryRange),
-		"limits", fmt.Sprintf("%+v", t.Cfg.LimitsConfig),
-	)
-	tripperware, stopper, err := queryrange.NewTripperware(
-		t.Cfg.QueryRange,
-		util_log.Logger,
-		t.overrides,
-		t.Cfg.SchemaConfig.SchemaConfig,
-		t.Cfg.Querier.QueryIngestersWithin,
-		prometheus.DefaultRegisterer,
-	)
-	if err != nil {
-		return
-	}
-	t.stopper = stopper
-
-	roundTripper = tripperware(roundTripper)
-	if t.QueryFrontEndTripperware != nil {
-		roundTripper = t.QueryFrontEndTripperware(roundTripper)
-	}
+	roundTripper = t.QueryFrontEndTripperware(roundTripper)
 
 	frontendHandler := transport.NewHandler(t.Cfg.Frontend.Handler, roundTripper, util_log.Logger, prometheus.DefaultRegisterer)
 	if t.Cfg.Frontend.CompressResponses {
@@ -494,7 +500,7 @@ func (t *Loki) initRulerStorage() (_ services.Service, err error) {
 	// unfortunately there is no way to generate a "default" config and compare default against actual
 	// to determine if it's unconfigured.  the following check, however, correctly tests this.
 	// Single binary integration tests will break if this ever drifts
-	if t.Cfg.Target == All && t.Cfg.Ruler.StoreConfig.IsDefaults() {
+	if t.Cfg.isModuleEnabled(All) && t.Cfg.Ruler.StoreConfig.IsDefaults() {
 		level.Info(util_log.Logger).Log("msg", "RulerStorage is not configured in single binary mode and will not be started.")
 		return
 	}
@@ -513,7 +519,7 @@ func (t *Loki) initRulerStorage() (_ services.Service, err error) {
 		}
 	}
 
-	t.RulerStorage, err = cortex_ruler.NewLegacyRuleStore(t.Cfg.Ruler.StoreConfig, manager.GroupLoader{}, util_log.Logger)
+	t.RulerStorage, err = cortex_ruler.NewLegacyRuleStore(t.Cfg.Ruler.StoreConfig, ruler.GroupLoader{}, util_log.Logger)
 
 	return
 }
@@ -598,7 +604,30 @@ func (t *Loki) initCompactor() (services.Service, error) {
 		return nil, err
 	}
 
+	if t.Cfg.CompactorConfig.RetentionEnabled {
+		t.Server.HTTP.Path("/loki/api/admin/delete").Methods("PUT", "POST").Handler(t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.compactor.DeleteRequestsHandler.AddDeleteRequestHandler)))
+		t.Server.HTTP.Path("/loki/api/admin/delete").Methods("GET").Handler(t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.compactor.DeleteRequestsHandler.GetAllDeleteRequestsHandler)))
+		t.Server.HTTP.Path("/loki/api/admin/cancel_delete_request").Methods("PUT", "POST").Handler(t.HTTPAuthMiddleware.Wrap(http.HandlerFunc(t.compactor.DeleteRequestsHandler.CancelDeleteRequestHandler)))
+	}
+
 	return t.compactor, nil
+}
+
+func (t *Loki) initIndexGateway() (services.Service, error) {
+	t.Cfg.StorageConfig.BoltDBShipperConfig.Mode = shipper.ModeReadOnly
+	objectClient, err := storage.NewObjectClient(t.Cfg.StorageConfig.BoltDBShipperConfig.SharedStoreType, t.Cfg.StorageConfig.Config)
+	if err != nil {
+		return nil, err
+	}
+
+	shipperIndexClient, err := shipper.NewShipper(t.Cfg.StorageConfig.BoltDBShipperConfig, objectClient, prometheus.DefaultRegisterer)
+	if err != nil {
+		return nil, err
+	}
+
+	gateway := indexgateway.NewIndexGateway(shipperIndexClient.(*shipper.Shipper))
+	indexgatewaypb.RegisterIndexGatewayServer(t.Server.GRPC, gateway)
+	return gateway, nil
 }
 
 func calculateMaxLookBack(pc chunk.PeriodConfig, maxLookBackConfig, minDuration time.Duration) (time.Duration, error) {

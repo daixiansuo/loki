@@ -108,7 +108,7 @@ Signature:
 `regexReplaceAll` returns a copy of the input string, replacing matches of the Regexp with the replacement string replacement. Inside string replacement, $ signs are interpreted as in Expand, so for instance $1 represents the text of the first sub-match. See the golang [Regexp.replaceAll documentation](https://golang.org/pkg/regexp/#Regexp.ReplaceAll) for more examples.
 
 ```template
-`{{ regexReplaceAllLiteral "(a*)bc" .some_label "${1}a" }}`
+`{{ regexReplaceAll "(a*)bc" .some_label "${1}a" }}`
 ```
 
 `regexReplaceAllLiteral` function returns a copy of the input string and replaces matches of the Regexp with the replacement string replacement. The replacement string is substituted directly, without using Expand.
@@ -594,4 +594,20 @@ Signature: `toFloat64(v interface{}) float64`
 
 ```template
 {{ "3.5" | float64 }} //output 3.5
+```
+
+## fromJson
+
+> **Note:** Added in Loki 2.3.
+
+fromJson decodes a JSON document into a structure. If the input cannot be decoded as JSON the function will return an empty string.
+
+```template
+fromJson "{\"foo\": 55}"
+```
+
+Example of a query to print a newline per queries stored as a json array in the log line:
+
+```logql
+{job="cortex/querier"} |= "finish in prometheus" | logfmt | line_format "{{ range $q := fromJson .queries }} {{ $q.query }} {{ end }}"
 ```

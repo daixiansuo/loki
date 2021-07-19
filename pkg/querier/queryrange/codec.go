@@ -30,9 +30,9 @@ import (
 	marshal_legacy "github.com/grafana/loki/pkg/util/marshal/legacy"
 )
 
-var lokiCodec = &codec{}
+var LokiCodec = &Codec{}
 
-type codec struct{}
+type Codec struct{}
 
 func (r *LokiRequest) GetEnd() int64 {
 	return r.EndTs.UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
@@ -108,6 +108,7 @@ func (r *LokiSeriesRequest) LogToSpan(sp opentracing.Span) {
 		otlog.String("matchers", strings.Join(r.GetMatch(), ",")),
 		otlog.String("start", timestamp.Time(r.GetStart()).String()),
 		otlog.String("end", timestamp.Time(r.GetEnd()).String()),
+		otlog.String("shards", strings.Join(r.GetShards(), ",")),
 	)
 }
 
@@ -150,7 +151,7 @@ func (r *LokiLabelNamesRequest) LogToSpan(sp opentracing.Span) {
 
 func (*LokiLabelNamesRequest) GetCachingOptions() (res queryrange.CachingOptions) { return }
 
-func (codec) DecodeRequest(_ context.Context, r *http.Request) (queryrange.Request, error) {
+func (Codec) DecodeRequest(_ context.Context, r *http.Request) (queryrange.Request, error) {
 	if err := r.ParseForm(); err != nil {
 		return nil, httpgrpc.Errorf(http.StatusBadRequest, err.Error())
 	}
@@ -196,10 +197,9 @@ func (codec) DecodeRequest(_ context.Context, r *http.Request) (queryrange.Reque
 	default:
 		return nil, httpgrpc.Errorf(http.StatusBadRequest, fmt.Sprintf("unknown request path: %s", r.URL.Path))
 	}
-
 }
 
-func (codec) EncodeRequest(ctx context.Context, r queryrange.Request) (*http.Request, error) {
+func (Codec) EncodeRequest(ctx context.Context, r queryrange.Request) (*http.Request, error) {
 	switch request := r.(type) {
 	case *LokiRequest:
 		params := url.Values{
@@ -235,7 +235,9 @@ func (codec) EncodeRequest(ctx context.Context, r queryrange.Request) (*http.Req
 			"end":     []string{fmt.Sprintf("%d", request.EndTs.UnixNano())},
 			"match[]": request.Match,
 		}
-
+		if len(request.Shards) > 0 {
+			params["shards"] = request.Shards
+		}
 		u := &url.URL{
 			Path:     "/loki/api/v1/series",
 			RawQuery: params.Encode(),
@@ -271,7 +273,7 @@ func (codec) EncodeRequest(ctx context.Context, r queryrange.Request) (*http.Req
 	}
 }
 
-func (codec) DecodeResponse(ctx context.Context, r *http.Response, req queryrange.Request) (queryrange.Response, error) {
+func (Codec) DecodeResponse(ctx context.Context, r *http.Response, req queryrange.Request) (queryrange.Response, error) {
 	if r.StatusCode/100 != 2 {
 		body, _ := ioutil.ReadAll(r.Body)
 		return nil, httpgrpc.Errorf(r.StatusCode, string(body))
@@ -355,10 +357,9 @@ func (codec) DecodeResponse(ctx context.Context, r *http.Response, req queryrang
 			return nil, httpgrpc.Errorf(http.StatusBadRequest, "unsupported response type")
 		}
 	}
-
 }
 
-func (codec) EncodeResponse(ctx context.Context, res queryrange.Response) (*http.Response, error) {
+func (Codec) EncodeResponse(ctx context.Context, res queryrange.Response) (*http.Response, error) {
 	sp, _ := opentracing.StartSpanFromContext(ctx, "codec.EncodeResponse")
 	defer sp.Finish()
 	var buf bytes.Buffer
@@ -424,7 +425,7 @@ func (codec) EncodeResponse(ctx context.Context, res queryrange.Response) (*http
 
 // NOTE: When we would start caching response from non-metric queries we would have to consider cache gen headers as well in
 // MergeResponse implementation for Loki codecs same as it is done in Cortex at https://github.com/cortexproject/cortex/blob/21bad57b346c730d684d6d0205efef133422ab28/pkg/querier/queryrange/query_range.go#L170
-func (codec) MergeResponse(responses ...queryrange.Response) (queryrange.Response, error) {
+func (Codec) MergeResponse(responses ...queryrange.Response) (queryrange.Response, error) {
 	if len(responses) == 0 {
 		return nil, errors.New("merging responses requires at least one response")
 	}
@@ -482,7 +483,6 @@ func (codec) MergeResponse(responses ...queryrange.Response) (queryrange.Respons
 					lokiSeriesData = append(lokiSeriesData, series)
 					uniqueSeries[series.String()] = struct{}{}
 				}
-
 			}
 		}
 
@@ -504,7 +504,6 @@ func (codec) MergeResponse(responses ...queryrange.Response) (queryrange.Respons
 					names = append(names, labelName)
 					uniqueNames[labelName] = struct{}{}
 				}
-
 			}
 		}
 
@@ -520,7 +519,6 @@ func (codec) MergeResponse(responses ...queryrange.Response) (queryrange.Respons
 
 // mergeOrderedNonOverlappingStreams merges a set of ordered, nonoverlapping responses by concatenating matching streams then running them through a heap to pull out limit values
 func mergeOrderedNonOverlappingStreams(resps []*LokiResponse, limit uint32, direction logproto.Direction) []logproto.Stream {
-
 	var total int
 
 	// turn resps -> map[labels] []entries
@@ -612,7 +610,6 @@ func mergeOrderedNonOverlappingStreams(resps []*LokiResponse, limit uint32, dire
 	}
 
 	return results
-
 }
 
 func toProto(m loghttp.Matrix) []queryrange.SampleStream {
@@ -642,7 +639,6 @@ func (res LokiResponse) Count() int64 {
 		result += int64(len(s.Entries))
 	}
 	return result
-
 }
 
 type paramsWrapper struct {
@@ -658,12 +654,15 @@ func paramsFromRequest(req queryrange.Request) *paramsWrapper {
 func (p paramsWrapper) Query() string {
 	return p.LokiRequest.Query
 }
+
 func (p paramsWrapper) Start() time.Time {
 	return p.StartTs
 }
+
 func (p paramsWrapper) End() time.Time {
 	return p.EndTs
 }
+
 func (p paramsWrapper) Step() time.Duration {
 	return time.Duration(p.LokiRequest.Step * 1e6)
 }

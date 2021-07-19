@@ -9,13 +9,17 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
-	"sort"
+	"reflect"
 	"time"
+	"unsafe"
 
 	"github.com/cespare/xxhash/v2"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
+	"github.com/prometheus/prometheus/pkg/labels"
+
+	"github.com/cortexproject/cortex/pkg/chunk/encoding"
 
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
@@ -29,8 +33,15 @@ const (
 	chunkFormatV2
 	chunkFormatV3
 
+	DefaultChunkFormat = chunkFormatV3 // the currently used chunk format
+
 	blocksPerChunk = 10
 	maxLineLength  = 1024 * 1024 * 1024
+
+	// defaultBlockSize is used for target block size when cutting partially deleted chunks from a delete request.
+	// This could wary from configured block size using `ingester.chunks-block-size` flag or equivalent yaml config resulting in
+	// different block size in the new chunk which should be fine.
+	defaultBlockSize = 256 * 1024
 )
 
 var magicNumber = uint32(0x12EE56A)
@@ -269,7 +280,7 @@ func NewMemChunk(enc Encoding, blockSize, targetSize int) *MemChunk {
 		blocks:     []block{},
 
 		head:   &headBlock{},
-		format: chunkFormatV3,
+		format: DefaultChunkFormat,
 
 		encoding: enc,
 	}
@@ -342,7 +353,7 @@ func NewByteChunk(b []byte, blockSize, targetSize int) (*MemChunk, error) {
 		// Verify checksums.
 		expCRC := binary.BigEndian.Uint32(b[blk.offset+l:])
 		if expCRC != crc32.Checksum(blk.b, castagnoliTable) {
-			level.Error(util_log.Logger).Log("msg", "Checksum does not match for a block in chunk, this block will be skipped", "err", ErrInvalidChecksum)
+			_ = level.Error(util_log.Logger).Log("msg", "Checksum does not match for a block in chunk, this block will be skipped", "err", ErrInvalidChecksum)
 			continue
 		}
 
@@ -756,6 +767,37 @@ func (c *MemChunk) Blocks(mintT, maxtT time.Time) []Block {
 	return blocks
 }
 
+// Rebound builds a smaller chunk with logs having timestamp from start and end(both inclusive)
+func (c *MemChunk) Rebound(start, end time.Time) (Chunk, error) {
+	// add a nanosecond to end time because the Chunk.Iterator considers end time to be non-inclusive.
+	itr, err := c.Iterator(context.Background(), start, end.Add(time.Nanosecond), logproto.FORWARD, log.NewNoopPipeline().ForStream(labels.Labels{}))
+	if err != nil {
+		return nil, err
+	}
+
+	// Using defaultBlockSize for target block size.
+	// The alternative here could be going over all the blocks and using the size of the largest block as target block size but I(Sandeep) feel that it is not worth the complexity.
+	// For target chunk size I am using compressed size of original chunk since the newChunk should anyways be lower in size than that.
+	newChunk := NewMemChunk(c.Encoding(), defaultBlockSize, c.CompressedSize())
+
+	for itr.Next() {
+		entry := itr.Entry()
+		if err := newChunk.Append(&entry); err != nil {
+			return nil, err
+		}
+	}
+
+	if newChunk.Size() == 0 {
+		return nil, encoding.ErrSliceNoDataInRange
+	}
+
+	if err := newChunk.Close(); err != nil {
+		return nil, err
+	}
+
+	return newChunk, nil
+}
+
 // encBlock is an internal wrapper for a block, mainly to avoid binding an encoding in a block itself.
 // This may seem roundabout, but the encoding is already a field on the parent MemChunk type. encBlock
 // then allows us to bind a decoding context to a block when requested, but otherwise helps reduce the
@@ -871,14 +913,12 @@ func (hb *headBlock) sampleIterator(ctx context.Context, mint, maxt int64, extra
 		lhash := parsedLabels.Hash()
 		if s, found = series[lhash]; !found {
 			s = &logproto.Series{
-				Labels: parsedLabels.String(),
+				Labels:  parsedLabels.String(),
+				Samples: SamplesPool.Get(len(hb.entries)).([]logproto.Sample)[:0],
 			}
 			series[lhash] = s
 		}
-
-		// []byte here doesn't create allocation because Sum64 has go:noescape directive
-		// It specifies that the function does not allow any of the pointers passed as arguments to escape into the heap or into the values returned from the function.
-		h := xxhash.Sum64([]byte(e.s))
+		h := xxhash.Sum64(unsafeGetBytes(e.s))
 		s.Samples = append(s.Samples, logproto.Sample{
 			Timestamp: e.t,
 			Value:     value,
@@ -891,11 +931,22 @@ func (hb *headBlock) sampleIterator(ctx context.Context, mint, maxt int64, extra
 	}
 	seriesRes := make([]logproto.Series, 0, len(series))
 	for _, s := range series {
-		// todo(ctovena) not sure we need this sort.
-		sort.Sort(s)
 		seriesRes = append(seriesRes, *s)
 	}
-	return iter.NewMultiSeriesIterator(ctx, seriesRes)
+	return iter.SampleIteratorWithClose(iter.NewMultiSeriesIterator(ctx, seriesRes), func() error {
+		for _, s := range series {
+			SamplesPool.Put(s.Samples)
+		}
+		return nil
+	})
+}
+
+func unsafeGetBytes(s string) []byte {
+	var buf []byte
+	p := unsafe.Pointer(&buf)
+	*(*string)(p) = s
+	(*reflect.SliceHeader)(p).Cap = len(s)
+	return buf
 }
 
 type bufferedIterator struct {

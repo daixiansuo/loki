@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/pkg/exemplar"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
@@ -49,11 +50,16 @@ import (
 const (
 	errTSDBCreateIncompatibleState = "cannot create a new TSDB while the ingester is not in active state (current state: %s)"
 	errTSDBIngest                  = "err: %v. timestamp=%s, series=%s" // Using error.Wrap puts the message before the error and if the series is too long, its truncated.
+	errTSDBIngestExemplar          = "err: %v. timestamp=%s, series=%s, exemplar=%s"
 
 	// Jitter applied to the idle timeout to prevent compaction in all ingesters concurrently.
 	compactionIdleTimeoutJitter = 0.25
 
 	instanceIngestionRateTickInterval = time.Second
+)
+
+var (
+	errExemplarRef = errors.New("exemplars not ingested because series not already present")
 )
 
 // Shipper interface is used to have an easy way to mock it in tests.
@@ -149,6 +155,10 @@ func (u *userTSDB) Querier(ctx context.Context, mint, maxt int64) (storage.Queri
 
 func (u *userTSDB) ChunkQuerier(ctx context.Context, mint, maxt int64) (storage.ChunkQuerier, error) {
 	return u.db.ChunkQuerier(ctx, mint, maxt)
+}
+
+func (u *userTSDB) ExemplarQuerier(ctx context.Context) (storage.ExemplarQuerier, error) {
+	return u.db.ExemplarQuerier(ctx)
 }
 
 func (u *userTSDB) Head() *tsdb.Head {
@@ -751,6 +761,8 @@ func (i *Ingester) v2Push(ctx context.Context, req *cortexpb.WriteRequest) (*cor
 	var (
 		succeededSamplesCount     = 0
 		failedSamplesCount        = 0
+		succeededExemplarsCount   = 0
+		failedExemplarsCount      = 0
 		startAppend               = time.Now()
 		sampleOutOfBoundsCount    = 0
 		sampleOutOfOrderCount     = 0
@@ -847,6 +859,38 @@ func (i *Ingester) v2Push(ctx context.Context, req *cortexpb.WriteRequest) (*cor
 				return copiedLabels
 			})
 		}
+
+		if i.cfg.BlocksStorageConfig.TSDB.MaxExemplars > 0 {
+			// app.AppendExemplar currently doesn't create the series, it must
+			// already exist.  If it does not then drop.
+			if ref == 0 && len(ts.Exemplars) > 0 {
+				updateFirstPartial(func() error {
+					return wrappedTSDBIngestExemplarErr(errExemplarRef,
+						model.Time(ts.Exemplars[0].TimestampMs), ts.Labels, ts.Exemplars[0].Labels)
+				})
+				failedExemplarsCount += len(ts.Exemplars)
+			} else { // Note that else is explicit, rather than a continue in the above if, in case of additional logic post exemplar processing.
+				for _, ex := range ts.Exemplars {
+					e := exemplar.Exemplar{
+						Value:  ex.Value,
+						Ts:     ex.TimestampMs,
+						HasTs:  true,
+						Labels: cortexpb.FromLabelAdaptersToLabelsWithCopy(ex.Labels),
+					}
+
+					if _, err = app.AppendExemplar(ref, nil, e); err == nil {
+						succeededExemplarsCount++
+						continue
+					}
+
+					// Error adding exemplar
+					updateFirstPartial(func() error {
+						return wrappedTSDBIngestExemplarErr(err, model.Time(ex.TimestampMs), ts.Labels, ex.Labels)
+					})
+					failedExemplarsCount++
+				}
+			}
+		}
 	}
 
 	// At this point all samples have been added to the appender, so we can track the time it took.
@@ -868,6 +912,8 @@ func (i *Ingester) v2Push(ctx context.Context, req *cortexpb.WriteRequest) (*cor
 	// which will be converted into an HTTP 5xx and the client should/will retry.
 	i.metrics.ingestedSamples.Add(float64(succeededSamplesCount))
 	i.metrics.ingestedSamplesFail.Add(float64(failedSamplesCount))
+	i.metrics.ingestedExemplars.Add(float64(succeededExemplarsCount))
+	i.metrics.ingestedExemplarsFail.Add(float64(failedExemplarsCount))
 
 	if sampleOutOfBoundsCount > 0 {
 		validation.DiscardedSamples.WithLabelValues(sampleOutOfBounds, userID).Add(float64(sampleOutOfBoundsCount))
@@ -989,6 +1035,53 @@ func (i *Ingester) v2Query(ctx context.Context, req *client.QueryRequest) (*clie
 	return result, ss.Err()
 }
 
+func (i *Ingester) v2QueryExemplars(ctx context.Context, req *client.ExemplarQueryRequest) (*client.ExemplarQueryResponse, error) {
+	userID, err := tenant.TenantID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	from, through, matchers, err := client.FromExemplarQueryRequest(req)
+	if err != nil {
+		return nil, err
+	}
+
+	i.metrics.queries.Inc()
+
+	db := i.getTSDB(userID)
+	if db == nil {
+		return &client.ExemplarQueryResponse{}, nil
+	}
+
+	q, err := db.ExemplarQuerier(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// It's not required to sort series from a single ingester because series are sorted by the Exemplar Storage before returning from Select.
+	res, err := q.Select(from, through, matchers...)
+	if err != nil {
+		return nil, err
+	}
+
+	numExemplars := 0
+
+	result := &client.ExemplarQueryResponse{}
+	for _, es := range res {
+		ts := cortexpb.TimeSeries{
+			Labels:    cortexpb.FromLabelsToLabelAdapters(es.SeriesLabels),
+			Exemplars: cortexpb.FromExemplarsToExemplarProtos(es.Exemplars),
+		}
+
+		numExemplars += len(ts.Exemplars)
+		result.Timeseries = append(result.Timeseries, ts)
+	}
+
+	i.metrics.queriedExemplars.Observe(float64(numExemplars))
+
+	return result, nil
+}
+
 func (i *Ingester) v2LabelValues(ctx context.Context, req *client.LabelValuesRequest) (*client.LabelValuesResponse, error) {
 	labelName, startTimestampMs, endTimestampMs, matchers, err := client.FromLabelValuesRequest(req)
 	if err != nil {
@@ -1095,7 +1188,13 @@ func (i *Ingester) v2MetricsForLabelMatchers(ctx context.Context, req *client.Me
 			return nil, ctx.Err()
 		}
 
-		seriesSet := q.Select(true, nil, matchers...)
+		hints := &storage.SelectHints{
+			Start: mint,
+			End:   maxt,
+			Func:  "series", // There is no series function, this token is used for lookups that don't need samples.
+		}
+
+		seriesSet := q.Select(true, hints, matchers...)
 		sets = append(sets, seriesSet)
 	}
 
@@ -1459,7 +1558,7 @@ func (i *Ingester) createTSDB(userID string) (*userTSDB, error) {
 	userDB := &userTSDB{
 		userID:              userID,
 		activeSeries:        NewActiveSeries(),
-		seriesInMetric:      newMetricCounter(i.limiter),
+		seriesInMetric:      newMetricCounter(i.limiter, i.cfg.getIgnoreSeriesLimitForMetricNamesMap()),
 		ingestedAPISamples:  util_math.NewEWMARate(0.2, i.cfg.RateUpdatePeriod),
 		ingestedRuleSamples: util_math.NewEWMARate(0.2, i.cfg.RateUpdatePeriod),
 
@@ -1479,6 +1578,7 @@ func (i *Ingester) createTSDB(userID string) (*userTSDB, error) {
 		WALSegmentSize:            i.cfg.BlocksStorageConfig.TSDB.WALSegmentSizeBytes,
 		SeriesLifecycleCallback:   userDB,
 		BlocksToDelete:            userDB.blocksToDelete,
+		MaxExemplars:              i.cfg.BlocksStorageConfig.TSDB.MaxExemplars,
 	})
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open TSDB: %s", udir)
@@ -2115,6 +2215,17 @@ func wrappedTSDBIngestErr(ingestErr error, timestamp model.Time, labels []cortex
 	}
 
 	return fmt.Errorf(errTSDBIngest, ingestErr, timestamp.Time().UTC().Format(time.RFC3339Nano), cortexpb.FromLabelAdaptersToLabels(labels).String())
+}
+
+func wrappedTSDBIngestExemplarErr(ingestErr error, timestamp model.Time, seriesLabels, exemplarLabels []cortexpb.LabelAdapter) error {
+	if ingestErr == nil {
+		return nil
+	}
+
+	return fmt.Errorf(errTSDBIngestExemplar, ingestErr, timestamp.Time().UTC().Format(time.RFC3339Nano),
+		cortexpb.FromLabelAdaptersToLabels(seriesLabels).String(),
+		cortexpb.FromLabelAdaptersToLabels(exemplarLabels).String(),
+	)
 }
 
 func (i *Ingester) getInstanceLimits() *InstanceLimits {
