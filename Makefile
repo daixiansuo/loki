@@ -38,7 +38,7 @@ DOCKER_IMAGE_DIRS := $(patsubst %/Dockerfile,%,$(DOCKERFILES))
 # make BUILD_IN_CONTAINER=false target
 # or you can override this with an environment variable
 BUILD_IN_CONTAINER ?= true
-BUILD_IMAGE_VERSION := 0.15.0
+BUILD_IMAGE_VERSION := 0.17.0
 
 # Docker image info
 IMAGE_PREFIX ?= grafana
@@ -58,7 +58,7 @@ DONT_FIND := -name tools -prune -o -name vendor -prune -o -name .git -prune -o -
 APP_GO_FILES := $(shell find . $(DONT_FIND) -name .y.go -prune -o -name .pb.go -prune -o -name cmd -prune -o -type f -name '*.go' -print)
 
 # Build flags
-VPREFIX := github.com/grafana/loki/pkg/build
+VPREFIX := github.com/grafana/loki/pkg/util/build
 GO_LDFLAGS   := -X $(VPREFIX).Branch=$(GIT_BRANCH) -X $(VPREFIX).Version=$(IMAGE_TAG) -X $(VPREFIX).Revision=$(GIT_REVISION) -X $(VPREFIX).BuildUser=$(shell whoami)@$(shell hostname) -X $(VPREFIX).BuildDate=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GO_FLAGS     := -ldflags "-extldflags \"-static\" -s -w $(GO_LDFLAGS)" -tags netgo $(MOD_FLAG)
 DYN_GO_FLAGS := -ldflags "-s -w $(GO_LDFLAGS)" -tags netgo $(MOD_FLAG)
@@ -607,7 +607,7 @@ fmt-jsonnet:
 lint-scripts:
 	@find . -name '*.sh' -not -path '*/vendor/*' -print0 | \
 		xargs -0 -n1 shellcheck -x -o all
-	
+
 
 # search for dead link in our documentation.
 # To avoid being rate limited by Github you can use an env variable GITHUB_TOKEN to pass a github token API.

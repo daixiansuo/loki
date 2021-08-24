@@ -3,6 +3,7 @@ package validation
 import (
 	"flag"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -20,6 +21,9 @@ const (
 	GlobalIngestionRateStrategy = "global"
 
 	bytesInMB = 1048576
+
+	defaultPerStreamRateLimit  = 1 << 20 // 1MB
+	defaultPerStreamBurstLimit = 2 * defaultPerStreamRateLimit
 )
 
 // Limits describe all the limits for users; can be used to describe global default
@@ -39,10 +43,14 @@ type Limits struct {
 	CreationGracePeriod    model.Duration   `yaml:"creation_grace_period" json:"creation_grace_period"`
 	EnforceMetricName      bool             `yaml:"enforce_metric_name" json:"enforce_metric_name"`
 	MaxLineSize            flagext.ByteSize `yaml:"max_line_size" json:"max_line_size"`
+	MaxLineSizeTruncate    bool             `yaml:"max_line_size_truncate" json:"max_line_size_truncate"`
 
 	// Ingester enforced limits.
-	MaxLocalStreamsPerUser  int `yaml:"max_streams_per_user" json:"max_streams_per_user"`
-	MaxGlobalStreamsPerUser int `yaml:"max_global_streams_per_user" json:"max_global_streams_per_user"`
+	MaxLocalStreamsPerUser       int              `yaml:"max_streams_per_user" json:"max_streams_per_user"`
+	MaxGlobalStreamsPerUser      int              `yaml:"max_global_streams_per_user" json:"max_global_streams_per_user"`
+	UnorderedWrites              bool             `yaml:"unordered_writes" json:"unordered_writes"`
+	MaxLocalStreamRateBytes      flagext.ByteSize `yaml:"max_stream_rate_bytes" json:"max_stream_rate_bytes"`
+	MaxLocalStreamBurstRateBytes flagext.ByteSize `yaml:"max_stream_burst_rate_bytes" json:"max_stream_burst_rate_bytes"`
 
 	// Querier enforced limits.
 	MaxChunksPerQuery          int            `yaml:"max_chunks_per_query" json:"max_chunks_per_query"`
@@ -55,9 +63,11 @@ type Limits struct {
 	MaxConcurrentTailRequests  int            `yaml:"max_concurrent_tail_requests" json:"max_concurrent_tail_requests"`
 	MaxEntriesLimitPerQuery    int            `yaml:"max_entries_limit_per_query" json:"max_entries_limit_per_query"`
 	MaxCacheFreshness          model.Duration `yaml:"max_cache_freshness_per_query" json:"max_cache_freshness_per_query"`
+	MaxQueriersPerTenant       int            `yaml:"max_queriers_per_tenant" json:"max_queriers_per_tenant"`
 
 	// Query frontend enforced limits. The default is actually parameterized by the queryrange config.
-	QuerySplitDuration model.Duration `yaml:"split_queries_by_interval" json:"split_queries_by_interval"`
+	QuerySplitDuration  model.Duration `yaml:"split_queries_by_interval" json:"split_queries_by_interval"`
+	MinShardingLookback model.Duration `yaml:"min_sharding_lookback" json:"min_sharding_lookback"`
 
 	// Ruler defaults and limits.
 	RulerEvaluationDelay          model.Duration `yaml:"ruler_evaluation_delay_duration" json:"ruler_evaluation_delay_duration"`
@@ -87,6 +97,7 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 	f.Float64Var(&l.IngestionRateMB, "distributor.ingestion-rate-limit-mb", 4, "Per-user ingestion rate limit in sample size per second. Units in MB.")
 	f.Float64Var(&l.IngestionBurstSizeMB, "distributor.ingestion-burst-size-mb", 6, "Per-user allowed ingestion burst size (in sample size). Units in MB.")
 	f.Var(&l.MaxLineSize, "distributor.max-line-size", "maximum line length allowed, i.e. 100mb. Default (0) means unlimited.")
+	f.BoolVar(&l.MaxLineSizeTruncate, "distributor.max-line-size-truncate", false, "Whether to truncate lines that exceed max_line_size")
 	f.IntVar(&l.MaxLabelNameLength, "validation.max-length-label-name", 1024, "Maximum length accepted for label names")
 	f.IntVar(&l.MaxLabelValueLength, "validation.max-length-label-value", 2048, "Maximum length accepted for label value. This setting also applies to the metric name")
 	f.IntVar(&l.MaxLabelNamesPerSeries, "validation.max-label-names-per-series", 30, "Maximum number of label names per series.")
@@ -101,6 +112,11 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 
 	f.IntVar(&l.MaxLocalStreamsPerUser, "ingester.max-streams-per-user", 10e3, "Maximum number of active streams per user, per ingester. 0 to disable.")
 	f.IntVar(&l.MaxGlobalStreamsPerUser, "ingester.max-global-streams-per-user", 0, "Maximum number of active streams per user, across the cluster. 0 to disable.")
+	f.BoolVar(&l.UnorderedWrites, "ingester.unordered-writes", false, "(Experimental) Allow out of order writes.")
+	_ = l.MaxLocalStreamRateBytes.Set(strconv.Itoa(defaultPerStreamRateLimit))
+	f.Var(&l.MaxLocalStreamRateBytes, "ingester.max-stream-rate-bytes", "Maximum bytes per second rate per active stream.")
+	_ = l.MaxLocalStreamBurstRateBytes.Set(strconv.Itoa(defaultPerStreamBurstLimit))
+	f.Var(&l.MaxLocalStreamBurstRateBytes, "ingester.max-stream-burst-bytes", "Maximum burst bytes per second rate per active stream.")
 
 	f.IntVar(&l.MaxChunksPerQuery, "store.query-chunk-limit", 2e6, "Maximum number of chunks that can be fetched in a single query.")
 
@@ -115,8 +131,13 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&l.MaxStreamsMatchersPerQuery, "querier.max-streams-matcher-per-query", 1000, "Limit the number of streams matchers per query")
 	f.IntVar(&l.MaxConcurrentTailRequests, "querier.max-concurrent-tail-requests", 10, "Limit the number of concurrent tail requests")
 
+	_ = l.MinShardingLookback.Set("0s")
+	f.Var(&l.MinShardingLookback, "frontend.min-sharding-lookback", "Limit the sharding time range.Queries with time range that fall between now and now minus the sharding lookback are not sharded. 0 to disable.")
+
 	_ = l.MaxCacheFreshness.Set("1m")
 	f.Var(&l.MaxCacheFreshness, "frontend.max-cache-freshness", "Most recent allowed cacheable result per-tenant, to prevent caching very recent results that might still be in flux.")
+
+	f.IntVar(&l.MaxQueriersPerTenant, "frontend.max-queriers-per-tenant", 0, "Maximum number of queriers that can handle requests for a single tenant. If set to 0 or value higher than number of available queriers, *all* queriers will handle requests for the tenant. Each frontend (or query-scheduler, if used) will select the same set of queriers for the same tenant (given that all queriers are connected to all frontends / query-schedulers). This option only works with queriers connecting to the query-frontend / query-scheduler, not when using downstream URL.")
 
 	_ = l.RulerEvaluationDelay.Set("0s")
 	f.Var(&l.RulerEvaluationDelay, "ruler.evaluation-delay-duration", "Duration to delay the evaluation of rules to ensure the underlying metrics have been pushed to Cortex.")
@@ -290,6 +311,11 @@ func (o *Overrides) MaxQuerySeries(userID string) int {
 	return o.getOverridesForUser(userID).MaxQuerySeries
 }
 
+// MaxQueriersPerUser returns the maximum number of queriers that can handle requests for this user.
+func (o *Overrides) MaxQueriersPerUser(userID string) int {
+	return o.getOverridesForUser(userID).MaxQueriersPerTenant
+}
+
 // MaxQueryParallelism returns the limit to the number of sub-queries the
 // frontend will process in parallel.
 func (o *Overrides) MaxQueryParallelism(userID string) int {
@@ -311,6 +337,11 @@ func (o *Overrides) MaxStreamsMatchersPerQuery(userID string) int {
 	return o.getOverridesForUser(userID).MaxStreamsMatchersPerQuery
 }
 
+// MinShardingLookback returns the tenant specific min sharding lookback (e.g from when we should start sharding).
+func (o *Overrides) MinShardingLookback(userID string) time.Duration {
+	return time.Duration(o.getOverridesForUser(userID).MinShardingLookback)
+}
+
 // QuerySplitDuration returns the tenant specific splitby interval applied in the query frontend.
 func (o *Overrides) QuerySplitDuration(userID string) time.Duration {
 	return time.Duration(o.getOverridesForUser(userID).QuerySplitDuration)
@@ -324,6 +355,11 @@ func (o *Overrides) MaxConcurrentTailRequests(userID string) int {
 // MaxLineSize returns the maximum size in bytes the distributor should allow.
 func (o *Overrides) MaxLineSize(userID string) int {
 	return o.getOverridesForUser(userID).MaxLineSize.Val()
+}
+
+// MaxLineSizeShouldTruncate returns whether lines longer than max should be truncated.
+func (o *Overrides) MaxLineSizeTruncate(userID string) bool {
+	return o.getOverridesForUser(userID).MaxLineSizeTruncate
 }
 
 // MaxEntriesLimitPerQuery returns the limit to number of entries the querier should return per query.
@@ -374,6 +410,18 @@ func (o *Overrides) RetentionPeriod(userID string) time.Duration {
 // StreamRetention returns the retention period for a given user.
 func (o *Overrides) StreamRetention(userID string) []StreamRetention {
 	return o.getOverridesForUser(userID).StreamRetention
+}
+
+func (o *Overrides) UnorderedWrites(userID string) bool {
+	return o.getOverridesForUser(userID).UnorderedWrites
+}
+
+func (o *Overrides) MaxLocalStreamRateBytes(userID string) int {
+	return o.getOverridesForUser(userID).MaxLocalStreamRateBytes.Val()
+}
+
+func (o *Overrides) MaxLocalStreamBurstRateBytes(userID string) int {
+	return o.getOverridesForUser(userID).MaxLocalStreamBurstRateBytes.Val()
 }
 
 func (o *Overrides) ForEachTenantLimit(callback ForEachTenantLimitCallback) {

@@ -1,5 +1,6 @@
 ---
 title: Template functions
+weight: 20
 ---
 
 # Template functions
@@ -68,7 +69,7 @@ The results in `This-is-a-string`.
 
 ## Trim, TrimLeft, TrimRight, and TrimSpace
 
-> **Note:** In Loki 2.1 [trim](#trim), [trimAll](#trimAll), [trimSuffix](#trimSuffix) and [trimPrefix](trimPrefix) have been added with a different signature for better pipeline chaining.
+> **Note:** In Loki 2.1 [trim](#trim), [trimAll](#trimall), [trimSuffix](#trimsuffix) and [trimPrefix](#trimprefix) have been added with a different signature for better pipeline chaining.
 
 `Trim` returns a slice of the string s with all leading and
 trailing Unicode code points contained in cutset removed.

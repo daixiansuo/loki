@@ -13,7 +13,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/exemplar"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/rules"
@@ -25,19 +24,6 @@ const (
 	statusSuccess           = "success"
 	statusFailure           = "failure"
 )
-
-type NoopAppender struct{}
-
-func (a NoopAppender) Appender(_ context.Context) storage.Appender             { return a }
-func (a NoopAppender) Add(l labels.Labels, t int64, v float64) (uint64, error) { return 0, nil }
-func (a NoopAppender) Append(ref uint64, l labels.Labels, t int64, v float64) (uint64, error) {
-	return 0, errors.New("unimplemented")
-}
-func (a NoopAppender) Commit() error   { return nil }
-func (a NoopAppender) Rollback() error { return nil }
-func (a NoopAppender) AppendExemplar(ref uint64, l labels.Labels, e exemplar.Exemplar) (uint64, error) {
-	return 0, errors.New("unimplemented")
-}
 
 func ForStateMetric(base labels.Labels, alertName string) labels.Labels {
 	b := labels.NewBuilder(base)
@@ -313,7 +299,7 @@ func (*memStoreQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([
 }
 
 // LabelNames returns all the unique label names present in the block in sorted order.
-func (*memStoreQuerier) LabelNames() ([]string, storage.Warnings, error) {
+func (*memStoreQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
 	return nil, nil, errors.New("unimplemented")
 }
 

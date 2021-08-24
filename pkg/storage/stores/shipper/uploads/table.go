@@ -13,14 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/chunk"
-	"github.com/cortexproject/cortex/pkg/chunk/local"
-	chunk_util "github.com/cortexproject/cortex/pkg/chunk/util"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/kit/log/level"
 	"go.etcd.io/bbolt"
 
 	"github.com/grafana/loki/pkg/chunkenc"
+	"github.com/grafana/loki/pkg/storage/chunk"
+	"github.com/grafana/loki/pkg/storage/chunk/local"
+	chunk_util "github.com/grafana/loki/pkg/storage/chunk/util"
 	shipper_util "github.com/grafana/loki/pkg/storage/stores/shipper/util"
 )
 
@@ -43,7 +43,7 @@ type BoltDBIndexClient interface {
 }
 
 type StorageClient interface {
-	PutObject(ctx context.Context, objectKey string, object io.ReadSeeker) error
+	PutFile(ctx context.Context, tableName, fileName string, file io.ReadSeeker) error
 }
 
 type dbSnapshot struct {
@@ -203,7 +203,6 @@ func (lt *Table) MultiQueries(ctx context.Context, queries []chunk.IndexQuery, c
 			}
 			return nil
 		})
-
 		if err != nil {
 			return err
 		}
@@ -411,8 +410,8 @@ func (lt *Table) uploadDB(ctx context.Context, name string, db *bbolt.DB) error 
 		return err
 	}
 
-	objectKey := lt.buildObjectKey(name)
-	return lt.storageClient.PutObject(ctx, objectKey, f)
+	fileName := lt.buildFileName(name)
+	return lt.storageClient.PutFile(ctx, lt.name, fileName, f)
 }
 
 // Cleanup removes dbs which are already uploaded and have not been modified for period longer than dbRetainPeriod.
@@ -453,16 +452,16 @@ func (lt *Table) Cleanup(dbRetainPeriod time.Duration) error {
 	return nil
 }
 
-func (lt *Table) buildObjectKey(dbName string) string {
-	// Files are stored with <table-name>/<uploader>-<db-name>
-	objectKey := fmt.Sprintf("%s/%s-%s", lt.name, lt.uploader, dbName)
+func (lt *Table) buildFileName(dbName string) string {
+	// Files are stored with <uploader>-<db-name>
+	fileName := fmt.Sprintf("%s-%s", lt.uploader, dbName)
 
 	// if the file is a migrated one then don't add its name to the object key otherwise we would re-upload them again here with a different name.
 	if lt.name == dbName {
-		objectKey = fmt.Sprintf("%s/%s", lt.name, lt.uploader)
+		fileName = lt.uploader
 	}
 
-	return fmt.Sprintf("%s.gz", objectKey)
+	return fmt.Sprintf("%s.gz", fileName)
 }
 
 func loadBoltDBsFromDir(dir string, metrics *metrics) (map[string]*bbolt.DB, error) {

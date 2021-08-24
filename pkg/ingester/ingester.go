@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/chunk"
 	"github.com/cortexproject/cortex/pkg/ring"
 	"github.com/cortexproject/cortex/pkg/tenant"
 	"github.com/cortexproject/cortex/pkg/util"
@@ -25,12 +24,14 @@ import (
 
 	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/ingester/client"
+	"github.com/grafana/loki/pkg/ingester/index"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql"
 	"github.com/grafana/loki/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/pkg/runtime"
 	"github.com/grafana/loki/pkg/storage"
+	"github.com/grafana/loki/pkg/storage/chunk"
 	"github.com/grafana/loki/pkg/storage/stores/shipper"
 	errUtil "github.com/grafana/loki/pkg/util"
 	listutil "github.com/grafana/loki/pkg/util"
@@ -80,6 +81,8 @@ type Config struct {
 	WAL WALConfig `yaml:"wal,omitempty"`
 
 	ChunkFilterer storage.RequestChunkFilterer `yaml:"-"`
+
+	IndexShards int `yaml:"index_shards"`
 }
 
 // RegisterFlags registers the flags.
@@ -102,6 +105,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&cfg.MaxChunkAge, "ingester.max-chunk-age", time.Hour, "Maximum chunk age before flushing.")
 	f.DurationVar(&cfg.QueryStoreMaxLookBackPeriod, "ingester.query-store-max-look-back-period", 0, "How far back should an ingester be allowed to query the store for data, for use only with boltdb-shipper index and filesystem object store. -1 for infinite.")
 	f.BoolVar(&cfg.AutoForgetUnhealthy, "ingester.autoforget-unhealthy", false, "Enable to remove unhealthy ingesters from the ring after `ring.kvstore.heartbeat_timeout`")
+	f.IntVar(&cfg.IndexShards, "ingester.index-shards", index.DefaultIndexShards, "Shard factor used in the ingesters for the in process reverse index. This MUST be evenly divisible by ALL schema shard factors or Loki will not start.")
 }
 
 func (cfg *Config) Validate() error {
@@ -118,6 +122,11 @@ func (cfg *Config) Validate() error {
 	if cfg.MaxTransferRetries > 0 && cfg.WAL.Enabled {
 		return errors.New("the use of the write ahead log (WAL) is incompatible with chunk transfers. It's suggested to use the WAL. Please try setting ingester.max-transfer-retries to 0 to disable transfers")
 	}
+
+	if cfg.IndexShards <= 0 {
+		return fmt.Errorf("Invalid ingester index shard factor: %d", cfg.IndexShards)
+	}
+
 	return nil
 }
 
@@ -219,7 +228,7 @@ func New(cfg Config, clientConfig client.Config, store ChunkStore, limits *valid
 
 	// Now that the lifecycler has been created, we can create the limiter
 	// which depends on it.
-	i.limiter = NewLimiter(limits, i.lifecycler, cfg.LifecyclerConfig.RingConfig.ReplicationFactor)
+	i.limiter = NewLimiter(limits, metrics, i.lifecycler, cfg.LifecyclerConfig.RingConfig.ReplicationFactor)
 
 	i.Service = services.NewBasicService(i.starting, i.running, i.stopping)
 
@@ -309,21 +318,37 @@ func (i *Ingester) setupAutoForget() {
 
 func (i *Ingester) starting(ctx context.Context) error {
 	if i.cfg.WAL.Enabled {
-		// Ignore retain period during wal replay.
-		old := i.cfg.RetainPeriod
-		i.cfg.RetainPeriod = 0
-		defer func() {
-			i.cfg.RetainPeriod = old
-		}()
+		start := time.Now()
 
-		// Disable the in process stream limit checks while replaying the WAL
-		i.limiter.Disable()
-		defer i.limiter.Enable()
+		// Ignore retain period during wal replay.
+		oldRetain := i.cfg.RetainPeriod
+		i.cfg.RetainPeriod = 0
+
+		// Disable the in process stream limit checks while replaying the WAL.
+		// It is re-enabled in the recover's Close() method.
+		i.limiter.DisableForWALReplay()
 
 		recoverer := newIngesterRecoverer(i)
-		defer recoverer.Close()
 
-		start := time.Now()
+		i.metrics.walReplayActive.Set(1)
+
+		endReplay := func() func() {
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					level.Info(util_log.Logger).Log("msg", "closing recoverer")
+					recoverer.Close()
+
+					elapsed := time.Since(start)
+
+					i.metrics.walReplayActive.Set(0)
+					i.metrics.walReplayDuration.Set(elapsed.Seconds())
+					i.cfg.RetainPeriod = oldRetain
+					level.Info(util_log.Logger).Log("msg", "WAL recovery finished", "time", elapsed.String())
+				})
+			}
+		}()
+		defer endReplay()
 
 		level.Info(util_log.Logger).Log("msg", "recovering from checkpoint")
 		checkpointReader, checkpointCloser, err := newCheckpointReader(i.cfg.WAL.Dir)
@@ -369,9 +394,7 @@ func (i *Ingester) starting(ctx context.Context) error {
 			"errors", segmentRecoveryErr != nil,
 		)
 
-		elapsed := time.Since(start)
-		i.metrics.walReplayDuration.Set(elapsed.Seconds())
-		level.Info(util_log.Logger).Log("msg", "recovery finished", "time", elapsed.String())
+		endReplay()
 
 		i.wal.Start()
 	}
