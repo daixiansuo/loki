@@ -8,7 +8,7 @@ Grafana Loki includes [Terraform](https://www.terraform.io/) and [CloudFormation
 
 ## Deployment
 
-lambda-promtail can easily be deployed via provided [Terraform](../../../../tools/lambda-promtail/main.tf) and [CloudFormation](../../../../tools/lambda-promtail/template.yaml) files. The Terraform deployment also pulls variable values defined from [vars.tf](../../../../tools/lambda-promtail/vars.tf).
+lambda-promtail can easily be deployed via provided [Terraform](https://github.com/grafana/loki/blob/main/tools/lambda-promtail/main.tf) and [CloudFormation](https://github.com/grafana/loki/blob/main/tools/lambda-promtail/template.yaml) files. The Terraform deployment also pulls variable values defined from [variables.tf](https://github.com/grafana/loki/blob/main/tools/lambda-promtail/variables.tf).
 
 For both deployment types there are a few values that must be defined:
 - the write address, a Loki Write API compatible endpoint (Loki or Promtail)
@@ -84,7 +84,7 @@ Incoming logs can have three special labels assigned to them which can be used i
 
 ### Promtail labels
 
-Note: This section is relevant if running Promtail between lambda-promtail and the end Loki deployment (out of order workaround).
+Note: This section is relevant if running Promtail between lambda-promtail and the end Loki deployment and was used to circumvent `out of order` problems prior to the v2.4 Loki release which removed the ordering constraint.
 
 As stated earlier, this workflow moves the worst case stream cardinality from `number_of_log_streams` -> `number_of_log_groups` * `number_of_promtails`. For this reason, each Promtail must have a unique label attached to logs it processes (ideally via something like `--client.external-labels=promtail=${HOSTNAME}`) and it's advised to run a small number of Promtails behind a load balancer according to your throughput and redundancy needs. 
 

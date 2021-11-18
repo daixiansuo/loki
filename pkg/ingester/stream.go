@@ -49,9 +49,7 @@ var (
 	})
 )
 
-var (
-	ErrEntriesExist = errors.New("duplicate push - entries already exist")
-)
+var ErrEntriesExist = errors.New("duplicate push - entries already exist")
 
 func init() {
 	prometheus.MustRegister(chunksCreatedTotal)
@@ -182,7 +180,8 @@ func (s *stream) Push(
 	s.chunkMtx.Lock()
 	defer s.chunkMtx.Unlock()
 
-	if counter > 0 && counter <= s.entryCt {
+	isReplay := counter > 0
+	if isReplay && counter <= s.entryCt {
 		var byteCt int
 		for _, e := range entries {
 			byteCt += len(e.Line)
@@ -209,8 +208,12 @@ func (s *stream) Push(
 	var rateLimitedSamples, rateLimitedBytes int
 	defer func() {
 		if outOfOrderSamples > 0 {
-			validation.DiscardedSamples.WithLabelValues(validation.OutOfOrder, s.tenant).Add(float64(outOfOrderSamples))
-			validation.DiscardedBytes.WithLabelValues(validation.OutOfOrder, s.tenant).Add(float64(outOfOrderBytes))
+			name := validation.OutOfOrder
+			if s.unorderedWrites {
+				name = validation.TooFarBehind
+			}
+			validation.DiscardedSamples.WithLabelValues(name, s.tenant).Add(float64(outOfOrderSamples))
+			validation.DiscardedBytes.WithLabelValues(name, s.tenant).Add(float64(outOfOrderBytes))
 		}
 		if rateLimitedSamples > 0 {
 			validation.DiscardedSamples.WithLabelValues(validation.StreamRateLimit, s.tenant).Add(float64(rateLimitedSamples))
@@ -252,13 +255,13 @@ func (s *stream) Push(
 		}
 
 		// The validity window for unordered writes is the highest timestamp present minus 1/2 * max-chunk-age.
-		if s.unorderedWrites && !s.highestTs.IsZero() && s.highestTs.Add(-s.cfg.MaxChunkAge/2).After(entries[i].Timestamp) {
-			failedEntriesWithError = append(failedEntriesWithError, entryWithError{&entries[i], chunkenc.ErrOutOfOrder})
+		if !isReplay && s.unorderedWrites && !s.highestTs.IsZero() && s.highestTs.Add(-s.cfg.MaxChunkAge/2).After(entries[i].Timestamp) {
+			failedEntriesWithError = append(failedEntriesWithError, entryWithError{&entries[i], chunkenc.ErrTooFarBehind})
 			outOfOrderSamples++
 			outOfOrderBytes += len(entries[i].Line)
 		} else if err := chunk.chunk.Append(&entries[i]); err != nil {
 			failedEntriesWithError = append(failedEntriesWithError, entryWithError{&entries[i], err})
-			if err == chunkenc.ErrOutOfOrder {
+			if chunkenc.IsOutOfOrderErr(err) {
 				outOfOrderSamples++
 				outOfOrderBytes += len(entries[i].Line)
 			}
@@ -324,11 +327,12 @@ func (s *stream) Push(
 	if len(failedEntriesWithError) > 0 {
 		lastEntryWithErr := failedEntriesWithError[len(failedEntriesWithError)-1]
 		_, ok := lastEntryWithErr.e.(*validation.ErrStreamRateLimit)
-		if lastEntryWithErr.e != chunkenc.ErrOutOfOrder && !ok {
+		outOfOrder := chunkenc.IsOutOfOrderErr(lastEntryWithErr.e)
+		if !outOfOrder && !ok {
 			return bytesAdded, lastEntryWithErr.e
 		}
 		var statusCode int
-		if lastEntryWithErr.e == chunkenc.ErrOutOfOrder {
+		if outOfOrder {
 			statusCode = http.StatusBadRequest
 		}
 		if ok {
@@ -419,7 +423,7 @@ func (s *stream) Bounds() (from, to time.Time) {
 }
 
 // Returns an iterator.
-func (s *stream) Iterator(ctx context.Context, ingStats *stats.IngesterData, from, through time.Time, direction logproto.Direction, pipeline log.StreamPipeline) (iter.EntryIterator, error) {
+func (s *stream) Iterator(ctx context.Context, statsCtx *stats.Context, from, through time.Time, direction logproto.Direction, pipeline log.StreamPipeline) (iter.EntryIterator, error) {
 	s.chunkMtx.RLock()
 	defer s.chunkMtx.RUnlock()
 	iterators := make([]iter.EntryIterator, 0, len(s.chunks))
@@ -455,8 +459,8 @@ func (s *stream) Iterator(ctx context.Context, ingStats *stats.IngesterData, fro
 		}
 	}
 
-	if ingStats != nil {
-		ingStats.TotalChunksMatched += int64(len(iterators))
+	if statsCtx != nil {
+		statsCtx.AddIngesterTotalChunkMatched(int64(len(iterators)))
 	}
 
 	if ordered {
@@ -466,7 +470,7 @@ func (s *stream) Iterator(ctx context.Context, ingStats *stats.IngesterData, fro
 }
 
 // Returns an SampleIterator.
-func (s *stream) SampleIterator(ctx context.Context, ingStats *stats.IngesterData, from, through time.Time, extractor log.StreamSampleExtractor) (iter.SampleIterator, error) {
+func (s *stream) SampleIterator(ctx context.Context, statsCtx *stats.Context, from, through time.Time, extractor log.StreamSampleExtractor) (iter.SampleIterator, error) {
 	s.chunkMtx.RLock()
 	defer s.chunkMtx.RUnlock()
 	iterators := make([]iter.SampleIterator, 0, len(s.chunks))
@@ -492,8 +496,8 @@ func (s *stream) SampleIterator(ctx context.Context, ingStats *stats.IngesterDat
 		}
 	}
 
-	if ingStats != nil {
-		ingStats.TotalChunksMatched += int64(len(iterators))
+	if statsCtx != nil {
+		statsCtx.AddIngesterTotalChunkMatched(int64(len(iterators)))
 	}
 
 	if ordered {

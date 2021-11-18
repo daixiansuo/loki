@@ -8,7 +8,6 @@ import (
 	"net/http"
 
 	cortex_tripper "github.com/cortexproject/cortex/pkg/querier/queryrange"
-	"github.com/cortexproject/cortex/pkg/ring"
 	cortex_ruler "github.com/cortexproject/cortex/pkg/ruler"
 	"github.com/cortexproject/cortex/pkg/ruler/rulestore"
 	"github.com/cortexproject/cortex/pkg/util"
@@ -20,6 +19,7 @@ import (
 	"github.com/grafana/dskit/grpcutil"
 	"github.com/grafana/dskit/kv/memberlist"
 	"github.com/grafana/dskit/modules"
+	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/runtimeconfig"
 	"github.com/grafana/dskit/services"
 	"github.com/pkg/errors"
@@ -209,6 +209,7 @@ type Loki struct {
 	// set during initialization
 	ModuleManager *modules.Manager
 	serviceMap    map[string]services.Service
+	deps          map[string][]string
 
 	Server                   *server.Server
 	ring                     *ring.Ring
@@ -287,7 +288,7 @@ func (t *Loki) Run() error {
 	}
 
 	t.serviceMap = serviceMap
-	t.Server.HTTP.Handle("/services", http.HandlerFunc(t.servicesHandler))
+	t.Server.HTTP.Path("/services").Methods("GET").Handler(http.HandlerFunc(t.servicesHandler))
 
 	// get all services, create service manager and tell it to start
 	var servs []services.Service
@@ -301,17 +302,17 @@ func (t *Loki) Run() error {
 	}
 
 	// before starting servers, register /ready handler. It should reflect entire Loki.
-	t.Server.HTTP.Path("/ready").Handler(t.readyHandler(sm))
+	t.Server.HTTP.Path("/ready").Methods("GET").Handler(t.readyHandler(sm))
 
 	grpc_health_v1.RegisterHealthServer(t.Server.GRPC, grpcutil.NewHealthCheck(sm))
 
 	// This adds a way to see the config and the changes compared to the defaults
-	t.Server.HTTP.Path("/config").HandlerFunc(configHandler(t.Cfg, newDefaultConfig()))
+	t.Server.HTTP.Path("/config").Methods("GET").HandlerFunc(configHandler(t.Cfg, newDefaultConfig()))
 
 	// Each component serves its version.
-	t.Server.HTTP.Path("/loki/api/v1/status/buildinfo").HandlerFunc(versionHandler())
+	t.Server.HTTP.Path("/loki/api/v1/status/buildinfo").Methods("GET").HandlerFunc(versionHandler())
 
-	t.Server.HTTP.Path("/debug/fgprof").Handler(fgprof.Handler())
+	t.Server.HTTP.Path("/debug/fgprof").Methods("GET", "POST").Handler(fgprof.Handler())
 
 	// Let's listen for events from this manager, and log them.
 	healthy := func() { level.Info(util_log.Logger).Log("msg", "Loki started") }
@@ -450,23 +451,17 @@ func (t *Loki) setupModuleManager() error {
 		QueryScheduler:           {Server, Overrides, MemberlistKV},
 		Ruler:                    {Ring, Server, Store, RulerStorage, IngesterQuerier, Overrides, TenantConfigs},
 		TableManager:             {Server},
-		Compactor:                {Server, Overrides},
+		Compactor:                {Server, Overrides, MemberlistKV},
 		IndexGateway:             {Server},
 		IngesterQuerier:          {Ring},
-		All:                      {QueryScheduler, QueryFrontend, Querier, Ingester, Distributor, Ruler},
-		Read:                     {QueryScheduler, QueryFrontend, Querier, Ruler},
+		All:                      {QueryScheduler, QueryFrontend, Querier, Ingester, Distributor, Ruler, Compactor},
+		Read:                     {QueryScheduler, QueryFrontend, Querier, Ruler, Compactor},
 		Write:                    {Ingester, Distributor},
 	}
 
 	// Add IngesterQuerier as a dependency for store when target is either ingester or querier.
-	if t.Cfg.isModuleEnabled(Querier) || t.Cfg.isModuleEnabled(Ruler) {
+	if t.Cfg.isModuleEnabled(Querier) || t.Cfg.isModuleEnabled(Ruler) || t.Cfg.isModuleEnabled(Read) {
 		deps[Store] = append(deps[Store], IngesterQuerier)
-	}
-
-	// If we are running Loki with boltdb-shipper as a single binary, without clustered mode(which should always be the case when using inmemory ring),
-	// we should start compactor as well for better user experience.
-	if storage.UsingBoltdbShipper(t.Cfg.SchemaConfig.Configs) && t.Cfg.Ingester.LifecyclerConfig.RingConfig.KVStore.Store == "inmemory" {
-		deps[All] = append(deps[All], Compactor)
 	}
 
 	// If the query scheduler and querier are running together, make sure the scheduler goes
@@ -487,7 +482,34 @@ func (t *Loki) setupModuleManager() error {
 		}
 	}
 
+	t.deps = deps
 	t.ModuleManager = mm
 
 	return nil
+}
+
+func (t *Loki) isModuleActive(m string) bool {
+	for _, target := range t.Cfg.Target {
+		if target == m {
+			return true
+		}
+		if t.recursiveIsModuleActive(target, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *Loki) recursiveIsModuleActive(target, m string) bool {
+	if targetDeps, ok := t.deps[target]; ok {
+		for _, dep := range targetDeps {
+			if dep == m {
+				return true
+			}
+			if t.recursiveIsModuleActive(dep, m) {
+				return true
+			}
+		}
+	}
+	return false
 }

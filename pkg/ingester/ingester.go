@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/ring"
 	"github.com/cortexproject/cortex/pkg/tenant"
 	"github.com/cortexproject/cortex/pkg/util"
 	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/log/level"
+	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -94,7 +95,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.ConcurrentFlushes, "ingester.concurrent-flushes", 16, "")
 	f.DurationVar(&cfg.FlushCheckPeriod, "ingester.flush-check-period", 30*time.Second, "")
 	f.DurationVar(&cfg.FlushOpTimeout, "ingester.flush-op-timeout", 10*time.Second, "")
-	f.DurationVar(&cfg.RetainPeriod, "ingester.chunks-retain-period", 15*time.Minute, "")
+	f.DurationVar(&cfg.RetainPeriod, "ingester.chunks-retain-period", 0, "")
 	f.DurationVar(&cfg.MaxChunkIdle, "ingester.chunks-idle-period", 30*time.Minute, "")
 	f.IntVar(&cfg.BlockSize, "ingester.chunks-block-size", 256*1024, "")
 	f.IntVar(&cfg.TargetChunkSize, "ingester.chunk-target-size", 1572864, "") // 1.5 MB
@@ -208,7 +209,13 @@ func New(cfg Config, clientConfig client.Config, store ChunkStore, limits *valid
 
 	if cfg.WAL.Enabled {
 		if err := os.MkdirAll(cfg.WAL.Dir, os.ModePerm); err != nil {
-			return nil, err
+			// Best effort try to make path absolute for easier debugging.
+			path, _ := filepath.Abs(cfg.WAL.Dir)
+			if path == "" {
+				path = cfg.WAL.Dir
+			}
+
+			return nil, fmt.Errorf("creating WAL folder at %q: %w", path, err)
 		}
 	}
 
@@ -218,7 +225,7 @@ func New(cfg Config, clientConfig client.Config, store ChunkStore, limits *valid
 	}
 	i.wal = wal
 
-	i.lifecycler, err = ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", ring.IngesterRingKey, !cfg.WAL.Enabled || cfg.WAL.FlushOnShutdown, registerer)
+	i.lifecycler, err = ring.NewLifecycler(cfg.LifecyclerConfig, i, "ingester", ring.IngesterRingKey, !cfg.WAL.Enabled || cfg.WAL.FlushOnShutdown, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
 	if err != nil {
 		return nil, err
 	}
@@ -522,9 +529,8 @@ func (i *Ingester) getOrCreateInstance(instanceID string) *instance {
 
 // Query the ingests for log streams matching a set of matchers.
 func (i *Ingester) Query(req *logproto.QueryRequest, queryServer logproto.Querier_QueryServer) error {
-	// initialize stats collection for ingester queries and set grpc trailer with stats.
-	ctx := stats.NewContext(queryServer.Context())
-	defer stats.SendAsTrailer(ctx, queryServer)
+	// initialize stats collection for ingester queries.
+	_, ctx := stats.NewContext(queryServer.Context())
 
 	instanceID, err := tenant.TenantID(ctx)
 	if err != nil {
@@ -563,9 +569,8 @@ func (i *Ingester) Query(req *logproto.QueryRequest, queryServer logproto.Querie
 
 // QuerySample the ingesters for series from logs matching a set of matchers.
 func (i *Ingester) QuerySample(req *logproto.SampleQueryRequest, queryServer logproto.Querier_QuerySampleServer) error {
-	// initialize stats collection for ingester queries and set grpc trailer with stats.
-	ctx := stats.NewContext(queryServer.Context())
-	defer stats.SendAsTrailer(ctx, queryServer)
+	// initialize stats collection for ingester queries.
+	_, ctx := stats.NewContext(queryServer.Context())
 
 	instanceID, err := tenant.TenantID(ctx)
 	if err != nil {

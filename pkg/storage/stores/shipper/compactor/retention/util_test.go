@@ -29,7 +29,7 @@ import (
 )
 
 func dayFromTime(t model.Time) chunk.DayTime {
-	parsed, err := time.Parse("2006-01-02", t.Time().Format("2006-01-02"))
+	parsed, err := time.Parse("2006-01-02", t.Time().In(time.UTC).Format("2006-01-02"))
 	if err != nil {
 		panic(err)
 	}
@@ -274,7 +274,7 @@ func TestExtractIntervalFromTableName(t *testing.T) {
 
 	calculateInterval := func(tm model.Time) (m model.Interval) {
 		m.Start = tm - tm%millisecondsInDay
-		m.End = m.Start + millisecondsInDay
+		m.End = m.Start + millisecondsInDay - 1
 		return
 	}
 
