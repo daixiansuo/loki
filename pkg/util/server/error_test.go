@@ -18,7 +18,7 @@ import (
 	"github.com/weaveworks/common/user"
 
 	"github.com/grafana/loki/pkg/logqlmodel"
-	"github.com/grafana/loki/pkg/storage/chunk"
+	storage_errors "github.com/grafana/loki/pkg/storage/errors"
 	"github.com/grafana/loki/pkg/util"
 )
 
@@ -32,9 +32,9 @@ func Test_writeError(t *testing.T) {
 	}{
 		{"cancelled", context.Canceled, ErrClientCanceled, StatusClientClosedRequest},
 		{"cancelled multi", util.MultiError{context.Canceled, context.Canceled}, ErrClientCanceled, StatusClientClosedRequest},
-		{"rpc cancelled", status.New(codes.Canceled, context.Canceled.Error()).Err(), ErrClientCanceled, StatusClientClosedRequest},
-		{"rpc cancelled multi", util.MultiError{status.New(codes.Canceled, context.Canceled.Error()).Err(), status.New(codes.Canceled, context.Canceled.Error()).Err()}, ErrClientCanceled, StatusClientClosedRequest},
-		{"mixed context and rpc cancelled", util.MultiError{context.Canceled, status.New(codes.Canceled, context.Canceled.Error()).Err()}, ErrClientCanceled, StatusClientClosedRequest},
+		{"rpc cancelled", status.New(codes.Canceled, context.Canceled.Error()).Err(), "rpc error: code = Canceled desc = context canceled", http.StatusInternalServerError},
+		{"rpc cancelled multi", util.MultiError{status.New(codes.Canceled, context.Canceled.Error()).Err(), status.New(codes.Canceled, context.Canceled.Error()).Err()}, "2 errors: rpc error: code = Canceled desc = context canceled; rpc error: code = Canceled desc = context canceled", http.StatusInternalServerError},
+		{"mixed context and rpc cancelled", util.MultiError{context.Canceled, status.New(codes.Canceled, context.Canceled.Error()).Err()}, "2 errors: context canceled; rpc error: code = Canceled desc = context canceled", http.StatusInternalServerError},
 		{"mixed context, rpc cancelled and another", util.MultiError{errors.New("standard error"), context.Canceled, status.New(codes.Canceled, context.Canceled.Error()).Err()}, "3 errors: standard error; context canceled; rpc error: code = Canceled desc = context canceled", http.StatusInternalServerError},
 		{"cancelled storage", promql.ErrStorage{Err: context.Canceled}, ErrClientCanceled, StatusClientClosedRequest},
 		{"orgid", user.ErrNoOrgID, user.ErrNoOrgID.Error(), http.StatusBadRequest},
@@ -47,8 +47,8 @@ func Test_writeError(t *testing.T) {
 		{"parse error", logqlmodel.ParseError{}, "parse error : ", http.StatusBadRequest},
 		{"httpgrpc", httpgrpc.Errorf(http.StatusBadRequest, errors.New("foo").Error()), "foo", http.StatusBadRequest},
 		{"internal", errors.New("foo"), "foo", http.StatusInternalServerError},
-		{"query error", chunk.ErrQueryMustContainMetricName, chunk.ErrQueryMustContainMetricName.Error(), http.StatusBadRequest},
-		{"wrapped query error", fmt.Errorf("wrapped: %w", chunk.ErrQueryMustContainMetricName), "wrapped: " + chunk.ErrQueryMustContainMetricName.Error(), http.StatusBadRequest},
+		{"query error", storage_errors.ErrQueryMustContainMetricName, storage_errors.ErrQueryMustContainMetricName.Error(), http.StatusBadRequest},
+		{"wrapped query error", fmt.Errorf("wrapped: %w", storage_errors.ErrQueryMustContainMetricName), "wrapped: " + storage_errors.ErrQueryMustContainMetricName.Error(), http.StatusBadRequest},
 		{"multi mixed", util.MultiError{context.Canceled, context.DeadlineExceeded}, "2 errors: context canceled; context deadline exceeded", http.StatusInternalServerError},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

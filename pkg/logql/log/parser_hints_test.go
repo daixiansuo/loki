@@ -4,10 +4,10 @@ package log_test
 import (
 	"testing"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/logql/syntax"
 )
 
 var (
@@ -216,7 +216,7 @@ func Test_ParserHints(t *testing.T) {
 		tt := tt
 		t.Run(tt.expr, func(t *testing.T) {
 			t.Parallel()
-			expr, err := logql.ParseSampleExpr(tt.expr)
+			expr, err := syntax.ParseSampleExpr(tt.expr)
 			require.NoError(t, err)
 
 			ex, err := expr.Extractor()

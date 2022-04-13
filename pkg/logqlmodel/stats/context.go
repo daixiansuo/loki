@@ -91,7 +91,7 @@ func (c *Context) Reset() {
 }
 
 // Result calculates the summary based on store and ingester data.
-func (c *Context) Result(execTime time.Duration) Result {
+func (c *Context) Result(execTime time.Duration, queueTime time.Duration) Result {
 	r := c.result
 
 	r.Merge(Result{
@@ -101,7 +101,7 @@ func (c *Context) Result(execTime time.Duration) Result {
 		Ingester: c.ingester,
 	})
 
-	r.ComputeSummary(execTime)
+	r.ComputeSummary(execTime, queueTime)
 
 	return r
 }
@@ -125,19 +125,20 @@ func JoinIngesters(ctx context.Context, inc Ingester) {
 }
 
 // ComputeSummary compute the summary of the statistics.
-func (r *Result) ComputeSummary(execTime time.Duration) {
+func (r *Result) ComputeSummary(execTime time.Duration, queueTime time.Duration) {
 	r.Summary.TotalBytesProcessed = r.Querier.Store.Chunk.DecompressedBytes + r.Querier.Store.Chunk.HeadChunkBytes +
 		r.Ingester.Store.Chunk.DecompressedBytes + r.Ingester.Store.Chunk.HeadChunkBytes
 	r.Summary.TotalLinesProcessed = r.Querier.Store.Chunk.DecompressedLines + r.Querier.Store.Chunk.HeadChunkLines +
 		r.Ingester.Store.Chunk.DecompressedLines + r.Ingester.Store.Chunk.HeadChunkLines
 	r.Summary.ExecTime = execTime.Seconds()
 	if execTime != 0 {
-		r.Summary.BytesProcessedPerSecond =
-			int64(float64(r.Summary.TotalBytesProcessed) /
-				execTime.Seconds())
-		r.Summary.LinesProcessedPerSecond =
-			int64(float64(r.Summary.TotalLinesProcessed) /
-				execTime.Seconds())
+		r.Summary.BytesProcessedPerSecond = int64(float64(r.Summary.TotalBytesProcessed) /
+			execTime.Seconds())
+		r.Summary.LinesProcessedPerSecond = int64(float64(r.Summary.TotalLinesProcessed) /
+			execTime.Seconds())
+	}
+	if queueTime != 0 {
+		r.Summary.QueueTime = queueTime.Seconds()
 	}
 }
 
@@ -165,10 +166,20 @@ func (i *Ingester) Merge(m Ingester) {
 	i.TotalReached += m.TotalReached
 }
 
+// Merge merges two results of statistics.
+// This will increase the total number of Subqueries.
 func (r *Result) Merge(m Result) {
+	r.Summary.Subqueries++
 	r.Querier.Merge(m.Querier)
 	r.Ingester.Merge(m.Ingester)
-	r.ComputeSummary(time.Duration(int64((r.Summary.ExecTime + m.Summary.ExecTime) * float64(time.Second))))
+	r.ComputeSummary(ConvertSecondsToNanoseconds(r.Summary.ExecTime+m.Summary.ExecTime),
+		ConvertSecondsToNanoseconds(r.Summary.QueueTime+m.Summary.QueueTime))
+}
+
+// ConvertSecondsToNanoseconds converts time.Duration representation of seconds (float64)
+// into time.Duration representation of nanoseconds (int64)
+func ConvertSecondsToNanoseconds(seconds float64) time.Duration {
+	return time.Duration(int64(seconds * float64(time.Second)))
 }
 
 func (r Result) ChunksDownloadTime() time.Duration {
@@ -280,6 +291,7 @@ func (s Summary) Log(log log.Logger) {
 		"Summary.LinesProcessedPerSecond", s.LinesProcessedPerSecond,
 		"Summary.TotalBytesProcessed", humanize.Bytes(uint64(s.TotalBytesProcessed)),
 		"Summary.TotalLinesProcessed", s.TotalLinesProcessed,
-		"Summary.ExecTime", time.Duration(int64(s.ExecTime*float64(time.Second))),
+		"Summary.ExecTime", ConvertSecondsToNanoseconds(s.ExecTime),
+		"Summary.QueueTime", ConvertSecondsToNanoseconds(s.QueueTime),
 	)
 }

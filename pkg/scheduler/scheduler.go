@@ -5,17 +5,10 @@ import (
 	"flag"
 	"io"
 	"net/http"
+	"net/textproto"
 	"sync"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-
-	"github.com/cortexproject/cortex/pkg/frontend/v2/frontendv2pb"
-	"github.com/cortexproject/cortex/pkg/scheduler/queue"
-	"github.com/cortexproject/cortex/pkg/scheduler/schedulerpb"
-	"github.com/cortexproject/cortex/pkg/tenant"
-	"github.com/cortexproject/cortex/pkg/util"
-	"github.com/cortexproject/cortex/pkg/util/validation"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/grpcclient"
@@ -33,13 +26,20 @@ import (
 	"go.uber.org/atomic"
 	"google.golang.org/grpc"
 
+	"github.com/grafana/dskit/tenant"
+
+	"github.com/grafana/loki/pkg/lokifrontend/frontend/v2/frontendv2pb"
+	"github.com/grafana/loki/pkg/scheduler/queue"
+	"github.com/grafana/loki/pkg/scheduler/schedulerpb"
+	"github.com/grafana/loki/pkg/util"
 	lokiutil "github.com/grafana/loki/pkg/util"
 	lokigrpc "github.com/grafana/loki/pkg/util/httpgrpc"
+	lokihttpreq "github.com/grafana/loki/pkg/util/httpreq"
+	util_log "github.com/grafana/loki/pkg/util/log"
+	"github.com/grafana/loki/pkg/util/validation"
 )
 
-var (
-	errSchedulerIsNotRunning = errors.New("scheduler is not running")
-)
+var errSchedulerIsNotRunning = errors.New("scheduler is not running")
 
 const (
 	// ringAutoForgetUnhealthyPeriods is how many consecutive timeout periods an unhealthy instance
@@ -93,6 +93,7 @@ type Scheduler struct {
 	connectedFrontendClients prometheus.GaugeFunc
 	queueDuration            prometheus.Histogram
 	schedulerRunning         prometheus.Gauge
+	inflightRequests         prometheus.Summary
 
 	// Ring used for finding schedulers
 	ringLifecycler *ring.BasicLifecycler
@@ -175,6 +176,13 @@ func NewScheduler(cfg Config, limits Limits, log log.Logger, registerer promethe
 		Name: "cortex_query_scheduler_running",
 		Help: "Value will be 1 if the scheduler is in the ReplicationSet and actively receiving/processing requests",
 	})
+	s.inflightRequests = promauto.With(registerer).NewSummary(prometheus.SummaryOpts{
+		Name:       "cortex_query_scheduler_inflight_requests",
+		Help:       "Number of inflight requests (either queued or processing) sampled at a regular interval. Quantile buckets keep track of inflight requests over the last 60s.",
+		Objectives: map[float64]float64{0.5: 0.05, 0.75: 0.02, 0.8: 0.02, 0.9: 0.01, 0.95: 0.01, 0.99: 0.001},
+		MaxAge:     time.Minute,
+		AgeBuckets: 6,
+	})
 
 	s.activeUsers = util.NewActiveUsersCleanupWithDefaultValues(s.cleanupMetricsForInactiveUser)
 
@@ -245,7 +253,7 @@ type schedulerRequest struct {
 	request         *httpgrpc.HTTPRequest
 	statsEnabled    bool
 
-	enqueueTime time.Time
+	queueTime time.Time
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -394,7 +402,7 @@ func (s *Scheduler) enqueueRequest(frontendContext context.Context, frontendAddr
 
 	req.parentSpanContext = parentSpanContext
 	req.queueSpan, req.ctx = opentracing.StartSpanFromContextWithTracer(ctx, tracer, "queued", opentracing.ChildOf(parentSpanContext))
-	req.enqueueTime = now
+	req.queueTime = now
 	req.ctxCancel = cancel
 
 	// aggregate the max queriers limit in the case of a multi tenant query
@@ -440,14 +448,6 @@ func (s *Scheduler) QuerierLoop(querier schedulerpb.SchedulerForQuerier_QuerierL
 	s.requestQueue.RegisterQuerierConnection(querierID)
 	defer s.requestQueue.UnregisterQuerierConnection(querierID)
 
-	// If the downstream connection to querier is cancelled,
-	// we need to ping the condition variable to unblock getNextRequestForQuerier.
-	// Ideally we'd have ctx aware condition variables...
-	go func() {
-		<-querier.Context().Done()
-		s.requestQueue.QuerierDisconnecting()
-	}()
-
 	lastUserIndex := queue.FirstUser()
 
 	// In stopping state scheduler is not accepting new queries, but still dispatching queries in the queues.
@@ -460,8 +460,15 @@ func (s *Scheduler) QuerierLoop(querier schedulerpb.SchedulerForQuerier_QuerierL
 
 		r := req.(*schedulerRequest)
 
-		s.queueDuration.Observe(time.Since(r.enqueueTime).Seconds())
+		reqQueueTime := time.Since(r.queueTime)
+		s.queueDuration.Observe(reqQueueTime.Seconds())
 		r.queueSpan.Finish()
+
+		// Add HTTP header to the request containing the query queue time
+		r.request.Headers = append(r.request.Headers, &httpgrpc.Header{
+			Key:    textproto.CanonicalMIMEHeaderKey(string(lokihttpreq.QueryQueueTimeHTTPHeader)),
+			Values: []string{reqQueueTime.String()},
+		})
 
 		/*
 		  We want to dequeue the next unexpired request from the chosen tenant queue.
@@ -543,7 +550,8 @@ func (s *Scheduler) forwardRequestToQuerier(querier schedulerpb.SchedulerForQuer
 func (s *Scheduler) forwardErrorToFrontend(ctx context.Context, req *schedulerRequest, requestErr error) {
 	opts, err := s.cfg.GRPCClientConfig.DialOption([]grpc.UnaryClientInterceptor{
 		otgrpc.OpenTracingClientInterceptor(opentracing.GlobalTracer()),
-		middleware.ClientUserHeaderInterceptor},
+		middleware.ClientUserHeaderInterceptor,
+	},
 		nil)
 	if err != nil {
 		level.Warn(s.log).Log("msg", "failed to create gRPC options for the connection to frontend to report error", "frontend", req.frontendAddress, "err", err, "requestErr", requestErr)
@@ -633,15 +641,23 @@ func (s *Scheduler) starting(ctx context.Context) (err error) {
 }
 
 func (s *Scheduler) running(ctx context.Context) error {
-	t := time.NewTicker(ringCheckPeriod)
-	defer t.Stop()
+	// We observe inflight requests frequently and at regular intervals, to have a good
+	// approximation of max inflight requests over percentiles of time. We also do it with
+	// a ticker so that we keep tracking it even if we have no new queries but stuck inflight
+	// requests (eg. queriers are all crashing).
+	inflightRequestsTicker := time.NewTicker(250 * time.Millisecond)
+	defer inflightRequestsTicker.Stop()
+
+	ringCheckTicker := time.NewTicker(ringCheckPeriod)
+	defer ringCheckTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case err := <-s.subservicesWatcher.Chan():
 			return errors.Wrap(err, "scheduler subservice failed")
-		case <-t.C:
+		case <-ringCheckTicker.C:
 			if !s.cfg.UseSchedulerRing {
 				continue
 			}
@@ -651,12 +667,17 @@ func (s *Scheduler) running(ctx context.Context) error {
 				continue
 			}
 			s.setRunState(isInSet)
+		case <-inflightRequestsTicker.C:
+			s.pendingRequestsMu.Lock()
+			inflight := len(s.pendingRequests)
+			s.pendingRequestsMu.Unlock()
+
+			s.inflightRequests.Observe(float64(inflight))
 		}
 	}
 }
 
 func (s *Scheduler) setRunState(isInSet bool) {
-
 	if isInSet {
 		if s.shouldRun.CAS(false, true) {
 			// Value was swapped, meaning this was a state change from stopped to running.
@@ -717,7 +738,6 @@ func SafeReadRing(s *Scheduler) ring.ReadRing {
 	}
 
 	return s.ring
-
 }
 
 func (s *Scheduler) OnRingInstanceRegister(_ *ring.BasicLifecycler, ringDesc ring.Desc, instanceExists bool, instanceID string, instanceDesc ring.InstanceDesc) (ring.InstanceState, ring.Tokens) {

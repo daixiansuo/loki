@@ -8,16 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/ruler"
-	"github.com/cortexproject/cortex/pkg/ruler/rulespb"
 	"github.com/go-kit/log"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/rulefmt"
+	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/notifier"
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/rulefmt"
-	"github.com/prometheus/prometheus/pkg/timestamp"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/rules"
@@ -27,6 +25,9 @@ import (
 
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/logql/syntax"
+	ruler "github.com/grafana/loki/pkg/ruler/base"
+	"github.com/grafana/loki/pkg/ruler/rulespb"
 	"github.com/grafana/loki/pkg/ruler/util"
 )
 
@@ -170,7 +171,7 @@ func MultiTenantRuleManager(cfg Config, engine *logql.Engine, overrides RulesLim
 type GroupLoader struct{}
 
 func (GroupLoader) Parse(query string) (parser.Expr, error) {
-	expr, err := logql.ParseExpr(query)
+	expr, err := syntax.ParseExpr(query)
 	if err != nil {
 		return nil, err
 	}
@@ -246,13 +247,9 @@ func validateRuleNode(r *rulefmt.RuleNode, groupName string) error {
 		return errors.Errorf("one of 'record' or 'alert' must be set")
 	}
 
-	if r.Record.Value != "" && r.Alert.Value != "" {
-		return errors.Errorf("only one of 'record' or 'alert' must be set")
-	}
-
 	if r.Expr.Value == "" {
 		return errors.Errorf("field 'expr' must be set in rule")
-	} else if _, err := logql.ParseExpr(r.Expr.Value); err != nil {
+	} else if _, err := syntax.ParseExpr(r.Expr.Value); err != nil {
 		return errors.Wrapf(err, fmt.Sprintf("could not parse expression for record '%s' in group '%s'", r.Record.Value, groupName))
 	}
 
@@ -341,7 +338,7 @@ func testTemplateParsing(rl *rulefmt.RuleNode) (errs []error) {
 
 // Allows logql expressions to be treated as promql expressions by the prometheus rules pkg.
 type exprAdapter struct {
-	logql.Expr
+	syntax.Expr
 }
 
 func (exprAdapter) PositionRange() parser.PositionRange { return parser.PositionRange{} }

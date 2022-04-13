@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,13 +13,12 @@ import (
 	"github.com/go-kit/log/level"
 	"go.etcd.io/bbolt"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-
 	"github.com/grafana/loki/pkg/chunkenc"
-	"github.com/grafana/loki/pkg/storage/chunk"
-	"github.com/grafana/loki/pkg/storage/chunk/local"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
+	"github.com/grafana/loki/pkg/storage/stores/series/index"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/storage"
 	shipper_util "github.com/grafana/loki/pkg/storage/stores/shipper/util"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 type deleteRequestsTable struct {
@@ -33,7 +33,7 @@ type deleteRequestsTable struct {
 
 const deleteRequestsIndexFileName = DeleteRequestsTableName + ".gz"
 
-func newDeleteRequestsTable(workingDirectory string, indexStorageClient storage.Client) (chunk.IndexClient, error) {
+func newDeleteRequestsTable(workingDirectory string, indexStorageClient storage.Client) (index.Client, error) {
 	dbPath := filepath.Join(workingDirectory, DeleteRequestsTableName, DeleteRequestsTableName)
 	boltdbIndexClient, err := local.NewBoltDBIndexClient(local.BoltDBConfig{Directory: filepath.Dir(dbPath)})
 	if err != nil {
@@ -65,7 +65,10 @@ func (t *deleteRequestsTable) init() error {
 
 	_, err := os.Stat(t.dbPath)
 	if err != nil {
-		err = shipper_util.GetFileFromStorage(context.Background(), t.indexStorageClient, DeleteRequestsTableName, deleteRequestsIndexFileName, t.dbPath, true)
+		err = shipper_util.DownloadFileFromStorage(t.dbPath, true,
+			true, shipper_util.LoggerWithFilename(util_log.Logger, deleteRequestsIndexFileName), func() (io.ReadCloser, error) {
+				return t.indexStorageClient.GetFile(context.Background(), DeleteRequestsTableName, deleteRequestsIndexFileName)
+			})
 		if err != nil && !t.indexStorageClient.IsFileNotFoundErr(err) {
 			return err
 		}
@@ -158,18 +161,18 @@ func (t *deleteRequestsTable) Stop() {
 	t.boltdbIndexClient.Stop()
 }
 
-func (t *deleteRequestsTable) NewWriteBatch() chunk.WriteBatch {
+func (t *deleteRequestsTable) NewWriteBatch() index.WriteBatch {
 	return t.boltdbIndexClient.NewWriteBatch()
 }
 
-func (t *deleteRequestsTable) BatchWrite(ctx context.Context, batch chunk.WriteBatch) error {
+func (t *deleteRequestsTable) BatchWrite(ctx context.Context, batch index.WriteBatch) error {
 	boltWriteBatch, ok := batch.(*local.BoltWriteBatch)
 	if !ok {
 		return errors.New("invalid write batch")
 	}
 
 	for _, tableWrites := range boltWriteBatch.Writes {
-		if err := t.boltdbIndexClient.WriteToDB(ctx, t.db, tableWrites); err != nil {
+		if err := t.boltdbIndexClient.WriteToDB(ctx, t.db, local.IndexBucketName, tableWrites); err != nil {
 			return err
 		}
 	}
@@ -177,9 +180,9 @@ func (t *deleteRequestsTable) BatchWrite(ctx context.Context, batch chunk.WriteB
 	return nil
 }
 
-func (t *deleteRequestsTable) QueryPages(ctx context.Context, queries []chunk.IndexQuery, callback func(chunk.IndexQuery, chunk.ReadBatch) (shouldContinue bool)) error {
+func (t *deleteRequestsTable) QueryPages(ctx context.Context, queries []index.Query, callback index.QueryPagesCallback) error {
 	for _, query := range queries {
-		if err := t.boltdbIndexClient.QueryDB(ctx, t.db, query, callback); err != nil {
+		if err := t.boltdbIndexClient.QueryDB(ctx, t.db, local.IndexBucketName, query, callback); err != nil {
 			return err
 		}
 	}

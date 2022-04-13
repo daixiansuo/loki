@@ -5,96 +5,108 @@ import (
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 	ww "github.com/weaveworks/common/server"
 	"github.com/weaveworks/common/user"
 	"go.etcd.io/bbolt"
 
-	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/logql/syntax"
 	"github.com/grafana/loki/pkg/storage"
 	"github.com/grafana/loki/pkg/storage/chunk"
-	"github.com/grafana/loki/pkg/storage/chunk/local"
-	chunk_storage "github.com/grafana/loki/pkg/storage/chunk/storage"
-	chunk_util "github.com/grafana/loki/pkg/storage/chunk/util"
+	"github.com/grafana/loki/pkg/storage/chunk/client"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
+	chunk_util "github.com/grafana/loki/pkg/storage/chunk/client/util"
+	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/storage/stores/shipper"
 	shipper_util "github.com/grafana/loki/pkg/storage/stores/shipper/util"
+	util_log "github.com/grafana/loki/pkg/util/log"
 	"github.com/grafana/loki/pkg/validation"
 )
 
-func dayFromTime(t model.Time) chunk.DayTime {
+func dayFromTime(t model.Time) config.DayTime {
 	parsed, err := time.Parse("2006-01-02", t.Time().In(time.UTC).Format("2006-01-02"))
 	if err != nil {
 		panic(err)
 	}
-	return chunk.DayTime{
+	return config.DayTime{
 		Time: model.TimeFromUnix(parsed.Unix()),
 	}
 }
 
 var (
 	start     = model.Now().Add(-30 * 24 * time.Hour)
-	schemaCfg = storage.SchemaConfig{
-		SchemaConfig: chunk.SchemaConfig{
-			// we want to test over all supported schema.
-			Configs: []chunk.PeriodConfig{
-				{
-					From:       dayFromTime(start),
-					IndexType:  "boltdb",
-					ObjectType: "filesystem",
-					Schema:     "v9",
-					IndexTables: chunk.PeriodicTableConfig{
-						Prefix: "index_",
-						Period: time.Hour * 24,
-					},
-					RowShards: 16,
+	schemaCfg = config.SchemaConfig{
+		// we want to test over all supported schema.
+		Configs: []config.PeriodConfig{
+			{
+				From:       dayFromTime(start),
+				IndexType:  "boltdb",
+				ObjectType: "filesystem",
+				Schema:     "v9",
+				IndexTables: config.PeriodicTableConfig{
+					Prefix: "index_",
+					Period: time.Hour * 24,
 				},
-				{
-					From:       dayFromTime(start.Add(25 * time.Hour)),
-					IndexType:  "boltdb",
-					ObjectType: "filesystem",
-					Schema:     "v10",
-					IndexTables: chunk.PeriodicTableConfig{
-						Prefix: "index_",
-						Period: time.Hour * 24,
-					},
-					RowShards: 16,
+				RowShards: 16,
+			},
+			{
+				From:       dayFromTime(start.Add(25 * time.Hour)),
+				IndexType:  "boltdb",
+				ObjectType: "filesystem",
+				Schema:     "v10",
+				IndexTables: config.PeriodicTableConfig{
+					Prefix: "index_",
+					Period: time.Hour * 24,
 				},
-				{
-					From:       dayFromTime(start.Add(73 * time.Hour)),
-					IndexType:  "boltdb",
-					ObjectType: "filesystem",
-					Schema:     "v11",
-					IndexTables: chunk.PeriodicTableConfig{
-						Prefix: "index_",
-						Period: time.Hour * 24,
-					},
-					RowShards: 16,
+				RowShards: 16,
+			},
+			{
+				From:       dayFromTime(start.Add(73 * time.Hour)),
+				IndexType:  "boltdb",
+				ObjectType: "filesystem",
+				Schema:     "v11",
+				IndexTables: config.PeriodicTableConfig{
+					Prefix: "index_",
+					Period: time.Hour * 24,
 				},
+				RowShards: 16,
+			},
+			{
+				From:       dayFromTime(start.Add(100 * time.Hour)),
+				IndexType:  "boltdb",
+				ObjectType: "filesystem",
+				Schema:     "v12",
+				IndexTables: config.PeriodicTableConfig{
+					Prefix: "index_",
+					Period: time.Hour * 24,
+				},
+				RowShards: 16,
 			},
 		},
 	}
 	allSchemas = []struct {
 		schema string
 		from   model.Time
-		config chunk.PeriodConfig
+		config config.PeriodConfig
 	}{
 		{"v9", schemaCfg.Configs[0].From.Time, schemaCfg.Configs[0]},
 		{"v10", schemaCfg.Configs[1].From.Time, schemaCfg.Configs[1]},
 		{"v11", schemaCfg.Configs[2].From.Time, schemaCfg.Configs[2]},
+		{"v12", schemaCfg.Configs[3].From.Time, schemaCfg.Configs[3]},
 	}
 
 	sweepMetrics = newSweeperMetrics(prometheus.DefaultRegisterer)
 )
 
 func newChunkEntry(userID, labels string, from, through model.Time) ChunkEntry {
-	lbs, err := logql.ParseLabels(labels)
+	lbs, err := syntax.ParseLabels(labels)
 	if err != nil {
 		panic(err)
 	}
@@ -112,25 +124,26 @@ func newChunkEntry(userID, labels string, from, through model.Time) ChunkEntry {
 type testStore struct {
 	storage.Store
 	cfg                storage.Config
-	objectClient       chunk.ObjectClient
+	objectClient       client.ObjectClient
 	indexDir, chunkDir string
-	schemaCfg          storage.SchemaConfig
+	schemaCfg          config.SchemaConfig
 	t                  testing.TB
-	limits             chunk_storage.StoreLimits
+	limits             storage.StoreLimits
+	clientMetrics      storage.ClientMetrics
 }
 
 // testObjectClient is a testing object client
 type testObjectClient struct {
-	chunk.ObjectClient
+	client.ObjectClient
 	path string
 }
 
-func newTestObjectClient(path string) chunk.ObjectClient {
-	c, err := chunk_storage.NewObjectClient("filesystem", chunk_storage.Config{
+func newTestObjectClient(path string, clientMetrics storage.ClientMetrics) client.ObjectClient {
+	c, err := storage.NewObjectClient("filesystem", storage.Config{
 		FSConfig: local.FSConfig{
 			Directory: path,
 		},
-	})
+	}, clientMetrics)
 	if err != nil {
 		panic(err)
 	}
@@ -163,9 +176,9 @@ func (t *testStore) HasChunk(c chunk.Chunk) bool {
 
 	chunkIDs := make(map[string]struct{})
 	for _, chk := range chunks {
-		chunkIDs[chk.ExternalKey()] = struct{}{}
+		chunkIDs[t.schemaCfg.ExternalKey(chk.ChunkRef)] = struct{}{}
 	}
-	return len(chunkIDs) == 1 && c.ExternalKey() == chunks[0].ExternalKey()
+	return len(chunkIDs) == 1 && t.schemaCfg.ExternalKey(c.ChunkRef) == t.schemaCfg.ExternalKey(chunks[0].ChunkRef)
 }
 
 func (t *testStore) GetChunks(userID string, from, through model.Time, metric labels.Labels) []chunk.Chunk {
@@ -174,35 +187,50 @@ func (t *testStore) GetChunks(userID string, from, through model.Time, metric la
 	for _, l := range metric {
 		matchers = append(matchers, labels.MustNewMatcher(labels.MatchEqual, l.Name, l.Value))
 	}
-	chunks, err := t.Store.Get(user.InjectOrgID(context.Background(), userID),
-		userID, from, through, matchers...)
+	ctx := user.InjectOrgID(context.Background(), userID)
+	chunks, fetchers, err := t.Store.GetChunkRefs(ctx, userID, from, through, matchers...)
 	require.NoError(t.t, err)
+	fetchedChunk := []chunk.Chunk{}
+	for _, f := range fetchers {
+		for _, cs := range chunks {
+			keys := make([]string, 0, len(cs))
+			sort.Slice(chunks, func(i, j int) bool {
+				return schemaCfg.ExternalKey(cs[i].ChunkRef) < schemaCfg.ExternalKey(cs[j].ChunkRef)
+			})
 
-	return chunks
+			for _, c := range cs {
+				keys = append(keys, schemaCfg.ExternalKey(c.ChunkRef))
+			}
+			cks, err := f.FetchChunks(ctx, cs, keys)
+			if err != nil {
+				t.t.Fatal(err)
+			}
+		outer:
+			for _, c := range cks {
+				for _, matcher := range matchers {
+					if !matcher.Matches(c.Metric.Get(matcher.Name)) {
+						continue outer
+					}
+				}
+				fetchedChunk = append(fetchedChunk, c)
+			}
+
+		}
+	}
+	return fetchedChunk
 }
 
 func (t *testStore) open() {
-	chunkStore, err := chunk_storage.NewStore(
-		t.cfg.Config,
-		chunk.StoreConfig{},
-		schemaCfg.SchemaConfig,
-		t.limits,
-		nil,
-		nil,
-		util_log.Logger,
-	)
-	require.NoError(t.t, err)
-
-	store, err := storage.NewStore(t.cfg, schemaCfg, chunkStore, nil)
+	store, err := storage.NewStore(t.cfg, config.ChunkStoreConfig{}, schemaCfg, t.limits, t.clientMetrics, nil, util_log.Logger)
 	require.NoError(t.t, err)
 	t.Store = store
 }
 
-func newTestStore(t testing.TB) *testStore {
+func newTestStore(t testing.TB, clientMetrics storage.ClientMetrics) *testStore {
 	t.Helper()
-	cfg := &ww.Config{}
-	require.Nil(t, cfg.LogLevel.Set("debug"))
-	util_log.InitLogger(cfg)
+	servercfg := &ww.Config{}
+	require.Nil(t, servercfg.LogLevel.Set("debug"))
+	util_log.InitLogger(servercfg, nil)
 	workdir := t.TempDir()
 	filepath.Join(workdir, "index")
 	indexDir := filepath.Join(workdir, "index")
@@ -219,17 +247,17 @@ func newTestStore(t testing.TB) *testStore {
 	limits, err := validation.NewOverrides(validation.Limits{}, nil)
 	require.NoError(t, err)
 
-	require.NoError(t, schemaCfg.SchemaConfig.Validate())
+	require.NoError(t, schemaCfg.Validate())
 
-	config := storage.Config{
-		Config: chunk_storage.Config{
-			BoltDBConfig: local.BoltDBConfig{
-				Directory: indexDir,
-			},
-			FSConfig: local.FSConfig{
-				Directory: chunkDir,
-			},
+	cfg := storage.Config{
+		BoltDBConfig: local.BoltDBConfig{
+			Directory: indexDir,
 		},
+		FSConfig: local.FSConfig{
+			Directory: chunkDir,
+		},
+		MaxParallelGetChunk: 150,
+
 		BoltDBShipperConfig: shipper.Config{
 			ActiveIndexDirectory: indexDir,
 			SharedStoreType:      "filesystem",
@@ -239,33 +267,24 @@ func newTestStore(t testing.TB) *testStore {
 			Mode:                 shipper.ModeReadWrite,
 		},
 	}
-	chunkStore, err := chunk_storage.NewStore(
-		config.Config,
-		chunk.StoreConfig{},
-		schemaCfg.SchemaConfig,
-		limits,
-		nil,
-		nil,
-		util_log.Logger,
-	)
-	require.NoError(t, err)
 
-	store, err := storage.NewStore(config, schemaCfg, chunkStore, nil)
+	store, err := storage.NewStore(cfg, config.ChunkStoreConfig{}, schemaCfg, limits, clientMetrics, nil, util_log.Logger)
 	require.NoError(t, err)
 	return &testStore{
-		indexDir:     indexDir,
-		chunkDir:     chunkDir,
-		t:            t,
-		Store:        store,
-		schemaCfg:    schemaCfg,
-		objectClient: newTestObjectClient(workdir),
-		cfg:          config,
-		limits:       limits,
+		indexDir:      indexDir,
+		chunkDir:      chunkDir,
+		t:             t,
+		Store:         store,
+		schemaCfg:     schemaCfg,
+		objectClient:  newTestObjectClient(workdir, clientMetrics),
+		cfg:           cfg,
+		limits:        limits,
+		clientMetrics: clientMetrics,
 	}
 }
 
 func TestExtractIntervalFromTableName(t *testing.T) {
-	periodicTableConfig := chunk.PeriodicTableConfig{
+	periodicTableConfig := config.PeriodicTableConfig{
 		Prefix: "dummy",
 		Period: 24 * time.Hour,
 	}

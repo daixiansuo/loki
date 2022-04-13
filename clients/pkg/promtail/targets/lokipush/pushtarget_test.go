@@ -15,7 +15,7 @@ import (
 	"github.com/grafana/dskit/flagext"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/relabel"
+	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/stretchr/testify/require"
 	"github.com/weaveworks/common/server"
 
@@ -84,7 +84,8 @@ func TestLokiPushTarget(t *testing.T) {
 		BatchWait: 1 * time.Second,
 		BatchSize: 100 * 1024,
 	}
-	pc, err := client.New(prometheus.DefaultRegisterer, ccfg, logger)
+	m := client.NewMetrics(prometheus.DefaultRegisterer, nil)
+	pc, err := client.New(m, ccfg, nil, logger)
 	require.NoError(t, err)
 	defer pc.Stop()
 
@@ -194,7 +195,7 @@ func TestPlaintextPushTarget(t *testing.T) {
 	require.Equal(t, expectedLabels, eh.Received()[0].Labels)
 
 	// Timestamp is always set in the handler, we expect received timestamps to be slightly higher than the timestamp when we started sending logs.
-	require.GreaterOrEqual(t, ts.Unix(), eh.Received()[99].Timestamp.Unix())
+	require.GreaterOrEqual(t, eh.Received()[99].Timestamp.Unix(), ts.Unix())
 
 	_ = pt.Stop()
 

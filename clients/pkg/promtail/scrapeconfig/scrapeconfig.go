@@ -24,7 +24,7 @@ import (
 	"github.com/prometheus/prometheus/discovery/openstack"
 	"github.com/prometheus/prometheus/discovery/triton"
 	"github.com/prometheus/prometheus/discovery/zookeeper"
-	"github.com/prometheus/prometheus/pkg/relabel"
+	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/weaveworks/common/server"
 
 	"github.com/grafana/loki/clients/pkg/logentry/stages"
@@ -33,17 +33,20 @@ import (
 
 // Config describes a job to scrape.
 type Config struct {
-	JobName                string                     `yaml:"job_name,omitempty"`
-	PipelineStages         stages.PipelineStages      `yaml:"pipeline_stages,omitempty"`
-	JournalConfig          *JournalTargetConfig       `yaml:"journal,omitempty"`
-	SyslogConfig           *SyslogTargetConfig        `yaml:"syslog,omitempty"`
-	GcplogConfig           *GcplogTargetConfig        `yaml:"gcplog,omitempty"`
-	PushConfig             *PushTargetConfig          `yaml:"loki_push_api,omitempty"`
-	WindowsConfig          *WindowsEventsTargetConfig `yaml:"windows_events,omitempty"`
-	KafkaConfig            *KafkaTargetConfig         `yaml:"kafka,omitempty"`
-	GelfConfig             *GelfTargetConfig          `yaml:"gelf,omitempty"`
-	RelabelConfigs         []*relabel.Config          `yaml:"relabel_configs,omitempty"`
-	ServiceDiscoveryConfig ServiceDiscoveryConfig     `yaml:",inline"`
+	JobName          string                     `yaml:"job_name,omitempty"`
+	PipelineStages   stages.PipelineStages      `yaml:"pipeline_stages,omitempty"`
+	JournalConfig    *JournalTargetConfig       `yaml:"journal,omitempty"`
+	SyslogConfig     *SyslogTargetConfig        `yaml:"syslog,omitempty"`
+	GcplogConfig     *GcplogTargetConfig        `yaml:"gcplog,omitempty"`
+	PushConfig       *PushTargetConfig          `yaml:"loki_push_api,omitempty"`
+	WindowsConfig    *WindowsEventsTargetConfig `yaml:"windows_events,omitempty"`
+	KafkaConfig      *KafkaTargetConfig         `yaml:"kafka,omitempty"`
+	GelfConfig       *GelfTargetConfig          `yaml:"gelf,omitempty"`
+	CloudflareConfig *CloudflareConfig          `yaml:"cloudflare,omitempty"`
+	RelabelConfigs   []*relabel.Config          `yaml:"relabel_configs,omitempty"`
+	// List of Docker service discovery configurations.
+	DockerSDConfigs        []*moby.DockerSDConfig `yaml:"docker_sd_configs,omitempty"`
+	ServiceDiscoveryConfig ServiceDiscoveryConfig `yaml:",inline"`
 }
 
 type ServiceDiscoveryConfig struct {
@@ -177,6 +180,10 @@ type SyslogTargetConfig struct {
 	// timestamp if it's set.
 	UseIncomingTimestamp bool `yaml:"use_incoming_timestamp"`
 
+	// UseRFC5424Message defines whether the full RFC5424 formatted syslog
+	// message should be pushed to Loki
+	UseRFC5424Message bool `yaml:"use_rfc5424_message"`
+
 	// MaxMessageLength sets the maximum limit to the length of syslog messages
 	MaxMessageLength int `yaml:"max_message_length"`
 
@@ -307,6 +314,27 @@ type GelfTargetConfig struct {
 	// UseIncomingTimestamp sets the timestamp to the incoming gelf messages
 	// timestamp if it's set.
 	UseIncomingTimestamp bool `yaml:"use_incoming_timestamp"`
+}
+
+type CloudflareConfig struct {
+	// APIToken is the API key for the Cloudflare account.
+	APIToken string `yaml:"api_token"`
+	// ZoneID is the ID of the zone to use.
+	ZoneID string `yaml:"zone_id"`
+	// Labels optionally holds labels to associate with each record read from cloudflare logs.
+	Labels model.LabelSet `yaml:"labels"`
+	// The amount of workers to use for parsing cloudflare logs. Default to 3.
+	Workers int `yaml:"workers"`
+	// The timerange to fetch for each pull request that will be spread across workers. Default 1m.
+	PullRange model.Duration `yaml:"pull_range"`
+	// Fields to fetch from cloudflare logs.
+	// Default to default fields.
+	// Available fields type:
+	// - default
+	// - minimal
+	// - extended
+	// - all
+	FieldsType string `yaml:"fields_type"`
 }
 
 // GcplogTargetConfig describes a scrape config to pull logs from any pubsub topic.

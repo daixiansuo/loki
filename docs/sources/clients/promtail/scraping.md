@@ -304,12 +304,18 @@ scrape_configs:
         source_labels:
           - __meta_kafka_group_id
         target_label: group
+      - action: replace
+        source_labels:
+          - __meta_kafka_message_key
+        target_label: message_key
 ```
 
 Only the `brokers` and `topics` is required.
 see the [configuration](../../configuration/#kafka) section for more information.
 
 ## GELF
+
+<span style="background-color:#f3f973;">GELF support in Promtail is an experimental feature.</span>
 
 Promtail supports listening message using the [GELF](https://docs.graylog.org/docs/gelf) UDP protocol.
 The GELF targets can be configured using the `gelf` stanza:
@@ -336,6 +342,25 @@ scrape_configs:
           - __gelf_message_facility
         target_label: facility
 ```
+
+## Cloudflare
+
+Promtail supports pulling HTTP log messages from Cloudflare using the [Logpull API](https://developers.cloudflare.com/logs/logpull).
+The Cloudflare targets can be configured with a `cloudflare` block:
+
+```yaml
+scrape_configs:
+- job_name: cloudflare
+  cloudflare:
+    api_token: REDACTED
+    zone_id: REDACTED
+    fields_type: all
+    labels:
+      job: cloudflare-foo.com
+```
+
+Only `api_token` and `zone_id` are required.
+Refer to the [Cloudfare](../../configuration/#cloudflare) configuration section for details.
 
 ## Relabeling
 

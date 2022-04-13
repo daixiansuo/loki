@@ -9,13 +9,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/frontend/v2/frontendv2pb"
-	"github.com/cortexproject/cortex/pkg/querier/stats"
-	"github.com/cortexproject/cortex/pkg/tenant"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/grpcclient"
+	"github.com/grafana/dskit/netutil"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
 	"github.com/opentracing/opentracing-go"
@@ -25,7 +23,12 @@ import (
 	"github.com/weaveworks/common/httpgrpc"
 	"go.uber.org/atomic"
 
+	"github.com/grafana/dskit/tenant"
+
+	"github.com/grafana/loki/pkg/lokifrontend/frontend/v2/frontendv2pb"
+	"github.com/grafana/loki/pkg/querier/stats"
 	lokigrpc "github.com/grafana/loki/pkg/util/httpgrpc"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 // Config for a Frontend.
@@ -45,10 +48,10 @@ type Config struct {
 
 func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.SchedulerAddress, "frontend.scheduler-address", "", "DNS hostname used for finding query-schedulers.")
-	f.DurationVar(&cfg.DNSLookupPeriod, "frontend.scheduler-dns-lookup-period", 10*time.Second, "How often to resolve the scheduler-address, in order to look for new query-scheduler instances.  Also used to determine how often to poll the scheduler-ring for addresses if the scheduler-ring is configured.")
+	f.DurationVar(&cfg.DNSLookupPeriod, "frontend.scheduler-dns-lookup-period", 10*time.Second, "How often to resolve the scheduler-address, in order to look for new query-scheduler instances. Also used to determine how often to poll the scheduler-ring for addresses if the scheduler-ring is configured.")
 	f.IntVar(&cfg.WorkerConcurrency, "frontend.scheduler-worker-concurrency", 5, "Number of concurrent workers forwarding queries to single query-scheduler.")
 
-	cfg.InfNames = []string{"eth0", "en0"}
+	cfg.InfNames = netutil.PrivateNetworkInterfacesWithFallback([]string{"eth0", "en0"}, util_log.Logger)
 	f.Var((*flagext.StringSlice)(&cfg.InfNames), "frontend.instance-interface-names", "Name of network interface to read address from. This address is sent to query-scheduler and querier, which uses it to send the query response back to query-frontend.")
 	f.StringVar(&cfg.Addr, "frontend.instance-addr", "", "IP address to advertise to querier (via scheduler) (resolved via interfaces by default).")
 	f.IntVar(&cfg.Port, "frontend.instance-port", 0, "Port to advertise to querier (via scheduler) (defaults to server.grpc-listen-port).")
@@ -192,21 +195,15 @@ func (f *Frontend) RoundTripGRPC(ctx context.Context, req *httpgrpc.HTTPRequest)
 	retries := f.cfg.WorkerConcurrency + 1 // To make sure we hit at least two different schedulers.
 
 enqueueAgain:
+	var cancelCh chan<- uint64
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 
 	case f.requestsCh <- freq:
 		// Enqueued, let's wait for response.
-	}
+		enqRes := <-freq.enqueue
 
-	var cancelCh chan<- uint64
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-
-	case enqRes := <-freq.enqueue:
 		if enqRes.status == waitForResponse {
 			cancelCh = enqRes.cancelCh
 			break // go wait for response.
@@ -228,6 +225,7 @@ enqueueAgain:
 				// cancellation sent.
 			default:
 				// failed to cancel, ignore.
+				level.Warn(f.log).Log("msg", "failed to send cancellation request to scheduler, queue full")
 			}
 		}
 		return nil, ctx.Err()

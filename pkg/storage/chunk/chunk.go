@@ -3,7 +3,6 @@ package chunk
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"hash/crc32"
 	"reflect"
 	"strconv"
@@ -11,15 +10,14 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/cortexproject/cortex/pkg/prom1/storage/metric"
 	"github.com/golang/snappy"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	errs "github.com/weaveworks/common/errors"
 
-	prom_chunk "github.com/grafana/loki/pkg/storage/chunk/encoding"
+	"github.com/grafana/loki/pkg/logproto"
 )
 
 const (
@@ -38,41 +36,31 @@ func errInvalidChunkID(s string) error {
 
 // Chunk contains encoded timeseries data
 type Chunk struct {
-	// These two fields will be missing from older chunks (as will the hash).
-	// On fetch we will initialise these fields from the DynamoDB key.
-	Fingerprint model.Fingerprint `json:"fingerprint"`
-	UserID      string            `json:"userID"`
+	logproto.ChunkRef
 
-	// These fields will be in all chunks, including old ones.
-	From    model.Time    `json:"from"`
-	Through model.Time    `json:"through"`
-	Metric  labels.Labels `json:"metric"`
-
-	// The hash is not written to the external storage either.  We use
-	// crc32, Castagnoli table.  See http://www.evanjones.ca/crc32c.html.
-	// For old chunks, ChecksumSet will be false.
-	ChecksumSet bool   `json:"-"`
-	Checksum    uint32 `json:"-"`
+	Metric labels.Labels `json:"metric"`
 
 	// We never use Delta encoding (the zero value), so if this entry is
 	// missing, we default to DoubleDelta.
-	Encoding prom_chunk.Encoding `json:"encoding"`
-	Data     prom_chunk.Chunk    `json:"-"`
+	Encoding Encoding `json:"encoding"`
+	Data     Data     `json:"-"`
 
 	// The encoded version of the chunk, held so we don't need to re-encode it
 	encoded []byte
 }
 
 // NewChunk creates a new chunk
-func NewChunk(userID string, fp model.Fingerprint, metric labels.Labels, c prom_chunk.Chunk, from, through model.Time) Chunk {
+func NewChunk(userID string, fp model.Fingerprint, metric labels.Labels, c Data, from, through model.Time) Chunk {
 	return Chunk{
-		Fingerprint: fp,
-		UserID:      userID,
-		From:        from,
-		Through:     through,
-		Metric:      metric,
-		Encoding:    c.Encoding(),
-		Data:        c,
+		ChunkRef: logproto.ChunkRef{
+			Fingerprint: uint64(fp),
+			UserID:      userID,
+			From:        from,
+			Through:     through,
+		},
+		Metric:   metric,
+		Encoding: c.Encoding(),
+		Data:     c,
 	}
 }
 
@@ -89,43 +77,17 @@ func NewChunk(userID string, fp model.Fingerprint, metric labels.Labels, c prom_
 // Post-checksums, externals keys become the same across DynamoDB, Memcache
 // and S3.  Numbers become hex encoded.  Keys look like:
 // `<user id>/<fingerprint>:<start time>:<end time>:<checksum>`.
+//
+// v12+, fingerprint is now a prefix to support better read and write request parallelization:
+// `<user>/<fprint>/<start>:<end>:<checksum>`
 func ParseExternalKey(userID, externalKey string) (Chunk, error) {
-	if !strings.Contains(externalKey, "/") {
-		return parseLegacyChunkID(userID, externalKey)
+	if strings.Count(externalKey, "/") == 2 { // v12+
+		return parseNewerExternalKey(userID, externalKey)
 	}
-	chunk, err := parseNewExternalKey(userID, externalKey)
-	if err != nil {
-		return Chunk{}, err
-	}
-
-	return chunk, nil
+	return parseNewExternalKey(userID, externalKey)
 }
 
-func parseLegacyChunkID(userID, key string) (Chunk, error) {
-	parts := strings.Split(key, ":")
-	if len(parts) != 3 {
-		return Chunk{}, errInvalidChunkID(key)
-	}
-	fingerprint, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
-		return Chunk{}, err
-	}
-	from, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return Chunk{}, err
-	}
-	through, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return Chunk{}, err
-	}
-	return Chunk{
-		UserID:      userID,
-		Fingerprint: model.Fingerprint(fingerprint),
-		From:        model.Time(from),
-		Through:     model.Time(through),
-	}, nil
-}
-
+// post-checksum
 func parseNewExternalKey(userID, key string) (Chunk, error) {
 	userIdx := strings.Index(key, "/")
 	if userIdx == -1 || userIdx+1 >= len(key) {
@@ -167,18 +129,77 @@ func parseNewExternalKey(userID, key string) (Chunk, error) {
 		return Chunk{}, err
 	}
 	return Chunk{
-		UserID:      userID,
-		Fingerprint: model.Fingerprint(fingerprint),
-		From:        model.Time(from),
-		Through:     model.Time(through),
-		Checksum:    uint32(checksum),
-		ChecksumSet: true,
+		ChunkRef: logproto.ChunkRef{
+			UserID:      userID,
+			Fingerprint: fingerprint,
+			From:        model.Time(from),
+			Through:     model.Time(through),
+			Checksum:    uint32(checksum),
+		},
+	}, nil
+}
+
+// v12+
+func parseNewerExternalKey(userID, key string) (Chunk, error) {
+	// Parse user
+	userIdx := strings.Index(key, "/")
+	if userIdx == -1 || userIdx+1 >= len(key) {
+		return Chunk{}, errInvalidChunkID(key)
+	}
+	if userID != key[:userIdx] {
+		return Chunk{}, errors.WithStack(ErrWrongMetadata)
+	}
+	hexParts := key[userIdx+1:]
+	partsBytes := unsafeGetBytes(hexParts)
+	// Parse fingerprint
+	h, i := readOneHexPart(partsBytes)
+	if i == 0 || i+1 >= len(partsBytes) {
+		return Chunk{}, errors.Wrap(errInvalidChunkID(key), "decoding fingerprint")
+	}
+	fingerprint, err := strconv.ParseUint(unsafeGetString(h), 16, 64)
+	if err != nil {
+		return Chunk{}, errors.Wrap(err, "parsing fingerprint")
+	}
+	partsBytes = partsBytes[i+1:]
+	// Parse start
+	h, i = readOneHexPart(partsBytes)
+	if i == 0 || i+1 >= len(partsBytes) {
+		return Chunk{}, errors.Wrap(errInvalidChunkID(key), "decoding start")
+	}
+	from, err := strconv.ParseInt(unsafeGetString(h), 16, 64)
+	if err != nil {
+		return Chunk{}, errors.Wrap(err, "parsing start")
+	}
+	partsBytes = partsBytes[i+1:]
+	// Parse through
+	h, i = readOneHexPart(partsBytes)
+	if i == 0 || i+1 >= len(partsBytes) {
+		return Chunk{}, errors.Wrap(errInvalidChunkID(key), "decoding through")
+	}
+	through, err := strconv.ParseInt(unsafeGetString(h), 16, 64)
+	if err != nil {
+		return Chunk{}, errors.Wrap(err, "parsing through")
+	}
+	partsBytes = partsBytes[i+1:]
+	// Parse checksum
+	checksum, err := strconv.ParseUint(unsafeGetString(partsBytes), 16, 64)
+	if err != nil {
+		return Chunk{}, errors.Wrap(err, "parsing checksum")
+	}
+	return Chunk{
+		ChunkRef: logproto.ChunkRef{
+			UserID:      userID,
+			Fingerprint: fingerprint,
+			From:        model.Time(from),
+			Through:     model.Time(through),
+			Checksum:    uint32(checksum),
+		},
 	}, nil
 }
 
 func readOneHexPart(hex []byte) (part []byte, i int) {
 	for i < len(hex) {
-		if hex[i] != ':' {
+		if hex[i] != ':' && hex[i] != '/' {
 			i++
 			continue
 		}
@@ -197,21 +218,6 @@ func unsafeGetBytes(s string) []byte {
 
 func unsafeGetString(buf []byte) string {
 	return *((*string)(unsafe.Pointer(&buf)))
-}
-
-// ExternalKey returns the key you can use to fetch this chunk from external
-// storage. For newer chunks, this key includes a checksum.
-func (c *Chunk) ExternalKey() string {
-	// Some chunks have a checksum stored in dynamodb, some do not.  We must
-	// generate keys appropriately.
-	if c.ChecksumSet {
-		// This is the inverse of parseNewExternalKey.
-		return fmt.Sprintf("%s/%x:%x:%x:%x", c.UserID, uint64(c.Fingerprint), int64(c.From), int64(c.Through), c.Checksum)
-	}
-	// This is the inverse of parseLegacyExternalKey, with "<user id>/" prepended.
-	// Legacy chunks had the user ID prefix on s3/memcache, but not in DynamoDB.
-	// See comment on parseExternalKey.
-	return fmt.Sprintf("%s/%d:%d:%d", c.UserID, uint64(c.Fingerprint), int64(c.From), int64(c.Through))
 }
 
 var writerPool = sync.Pool{
@@ -267,7 +273,6 @@ func (c *Chunk) EncodeTo(buf *bytes.Buffer) error {
 
 	// Now work out the checksum
 	c.encoded = buf.Bytes()
-	c.ChecksumSet = true
 	c.Checksum = crc32.Checksum(c.encoded, castagnoliTable)
 	return nil
 }
@@ -299,7 +304,7 @@ func NewDecodeContext() *DecodeContext {
 func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 	// First, calculate the checksum of the chunk and confirm it matches
 	// what we expected.
-	if c.ChecksumSet && c.Checksum != crc32.Checksum(input, castagnoliTable) {
+	if c.Checksum != crc32.Checksum(input, castagnoliTable) {
 		return errors.WithStack(ErrInvalidChecksum)
 	}
 
@@ -325,22 +330,16 @@ func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 	// Next, confirm the chunks matches what we expected.  Easiest way to do this
 	// is to compare what the decoded data thinks its external ID would be, but
 	// we don't write the checksum to s3, so we have to copy the checksum in.
-	if c.ChecksumSet {
-		tempMetadata.Checksum, tempMetadata.ChecksumSet = c.Checksum, c.ChecksumSet
-		if !equalByKey(*c, tempMetadata) {
-			return errors.WithStack(ErrWrongMetadata)
-		}
+
+	tempMetadata.Checksum = c.Checksum
+	if !equalByKey(*c, tempMetadata) {
+		return errors.WithStack(ErrWrongMetadata)
 	}
+
 	*c = tempMetadata
 
-	// Older chunks always used DoubleDelta and did not write Encoding
-	// to JSON, so override if it has the zero value (Delta)
-	if c.Encoding == prom_chunk.Delta {
-		c.Encoding = prom_chunk.DoubleDelta
-	}
-
 	// Finally, unmarshal the actual chunk data.
-	c.Data, err = prom_chunk.NewForEncoding(c.Encoding)
+	c.Data, err = NewForEncoding(c.Encoding)
 	if err != nil {
 		return errors.Wrap(err, "when creating new chunk")
 	}
@@ -362,35 +361,4 @@ func (c *Chunk) Decode(decodeContext *DecodeContext, input []byte) error {
 func equalByKey(a, b Chunk) bool {
 	return a.UserID == b.UserID && a.Fingerprint == b.Fingerprint &&
 		a.From == b.From && a.Through == b.Through && a.Checksum == b.Checksum
-}
-
-// Samples returns all SamplePairs for the chunk.
-func (c *Chunk) Samples(from, through model.Time) ([]model.SamplePair, error) {
-	it := c.Data.NewIterator(nil)
-	interval := metric.Interval{OldestInclusive: from, NewestInclusive: through}
-	return prom_chunk.RangeValues(it, interval)
-}
-
-// Slice builds a new smaller chunk with data only from given time range (inclusive)
-func (c *Chunk) Slice(from, through model.Time) (*Chunk, error) {
-	// there should be atleast some overlap between chunk interval and slice interval
-	if from > c.Through || through < c.From {
-		return nil, ErrSliceOutOfRange
-	}
-
-	pc, err := c.Data.Rebound(from, through)
-	if err != nil {
-		return nil, err
-	}
-
-	nc := NewChunk(c.UserID, c.Fingerprint, c.Metric, pc, from, through)
-	return &nc, nil
-}
-
-func intervalsOverlap(interval1, interval2 model.Interval) bool {
-	if interval1.Start > interval2.End || interval2.Start > interval1.End {
-		return false
-	}
-
-	return true
 }

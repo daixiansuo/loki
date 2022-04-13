@@ -3,8 +3,6 @@ package deletion
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -15,7 +13,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/loki/pkg/storage/chunk/local"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
 )
 
 func TestDeleteRequestsStore(t *testing.T) {
@@ -32,7 +30,7 @@ func TestDeleteRequestsStore(t *testing.T) {
 			StartTime: now.Add(-i * time.Hour),
 			EndTime:   now.Add(-i * time.Hour).Add(30 * time.Minute),
 			CreatedAt: now.Add(-i * time.Hour).Add(30 * time.Minute),
-			Selectors: []string{fmt.Sprintf(`{foo="%d", user="%s"}`, i, user1)},
+			Query:     fmt.Sprintf(`{foo="%d", user="%s"}`, i, user1),
 			Status:    StatusReceived,
 		})
 		user2ExpectedRequests = append(user2ExpectedRequests, DeleteRequest{
@@ -40,17 +38,13 @@ func TestDeleteRequestsStore(t *testing.T) {
 			StartTime: now.Add(-i * time.Hour),
 			EndTime:   now.Add(-(i + 1) * time.Hour),
 			CreatedAt: now.Add(-(i + 1) * time.Hour),
-			Selectors: []string{fmt.Sprintf(`{foo="%d", user="%s"}`, i, user2)},
+			Query:     fmt.Sprintf(`{foo="%d", user="%s"}`, i, user2),
 			Status:    StatusReceived,
 		})
 	}
 
 	// build the store
-	tempDir, err := ioutil.TempDir("", "test-delete-requests-store")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(tempDir))
-	}()
+	tempDir := t.TempDir()
 
 	workingDir := filepath.Join(tempDir, "working-dir")
 	objectStorePath := filepath.Join(tempDir, "object-store")
@@ -72,10 +66,11 @@ func TestDeleteRequestsStore(t *testing.T) {
 			user1ExpectedRequests[i].CreatedAt,
 			user1ExpectedRequests[i].StartTime,
 			user1ExpectedRequests[i].EndTime,
-			user1ExpectedRequests[i].Selectors,
+			user1ExpectedRequests[i].Query,
 		)
 		require.NoError(t, err)
 		user1ExpectedRequests[i].RequestID = string(requestID)
+		require.NoError(t, user1ExpectedRequests[i].SetQuery(user1ExpectedRequests[i].Query))
 
 		requestID, err = testDeleteRequestsStore.(*deleteRequestsStore).addDeleteRequest(
 			context.Background(),
@@ -83,10 +78,11 @@ func TestDeleteRequestsStore(t *testing.T) {
 			user2ExpectedRequests[i].CreatedAt,
 			user2ExpectedRequests[i].StartTime,
 			user2ExpectedRequests[i].EndTime,
-			user2ExpectedRequests[i].Selectors,
+			user2ExpectedRequests[i].Query,
 		)
 		require.NoError(t, err)
 		user2ExpectedRequests[i].RequestID = string(requestID)
+		require.NoError(t, user2ExpectedRequests[i].SetQuery(user2ExpectedRequests[i].Query))
 	}
 
 	// get all requests with StatusReceived and see if they have expected values

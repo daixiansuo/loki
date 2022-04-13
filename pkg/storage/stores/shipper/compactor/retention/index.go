@@ -1,20 +1,18 @@
 package retention
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/common/model"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-	"github.com/go-kit/log/level"
-
-	"github.com/grafana/loki/pkg/storage"
-	"github.com/grafana/loki/pkg/storage/chunk"
-	"github.com/grafana/loki/pkg/storage/stores/shipper"
+	"github.com/grafana/loki/pkg/storage/config"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 const (
@@ -110,14 +108,24 @@ func parseChunkID(chunkID []byte) (userID []byte, hexFrom, hexThrough []byte, va
 		hex = chunkID[j+1:]
 		break
 	}
+
 	if len(userID) == 0 {
 		return nil, nil, nil, false
 	}
-	_, i = readOneHexPart(hex)
-	if i == 0 {
-		return nil, nil, nil, false
+
+	// v12+ chunk id format `<user>/<fprint>/<start>:<end>:<checksum>`
+	// older than v12 chunk id format `<user id>/<fingerprint>:<start time>:<end time>:<checksum>`
+	if idx := bytes.IndexByte(hex, '/'); idx != -1 {
+		// v12+ chunk id format, let us skip through the fingerprint using '/`
+		hex = hex[idx+1:]
+	} else {
+		// older than v12 chunk id format, let us skip through the fingerprint using ':'
+		_, i = readOneHexPart(hex)
+		if i == 0 {
+			return nil, nil, nil, false
+		}
+		hex = hex[i+1:]
 	}
-	hex = hex[i+1:]
 	hexFrom, i = readOneHexPart(hex)
 	if i == 0 {
 		return nil, nil, nil, false
@@ -205,9 +213,9 @@ func parseLabelSeriesRangeKey(hashKey, rangeKey []byte) (LabelSeriesRangeKey, bo
 	}, true, nil
 }
 
-func validatePeriods(config storage.SchemaConfig) error {
-	for _, schema := range config.Configs {
-		if schema.IndexType != shipper.BoltDBShipperType {
+func validatePeriods(cfg config.SchemaConfig) error {
+	for _, schema := range cfg.Configs {
+		if schema.IndexType != config.BoltDBShipperType {
 			level.Warn(util_log.Logger).Log("msg", fmt.Sprintf("custom retention is not supported for store %s, no retention will be applied for schema entry with start date %s", schema.IndexType, schema.From))
 			continue
 		}
@@ -218,17 +226,17 @@ func validatePeriods(config storage.SchemaConfig) error {
 	return nil
 }
 
-func schemaPeriodForTable(config storage.SchemaConfig, tableName string) (chunk.PeriodConfig, bool) {
+func schemaPeriodForTable(cfg config.SchemaConfig, tableName string) (config.PeriodConfig, bool) {
 	// first round removes configs that does not have the prefix.
-	candidates := []chunk.PeriodConfig{}
-	for _, schema := range config.Configs {
+	candidates := []config.PeriodConfig{}
+	for _, schema := range cfg.Configs {
 		if strings.HasPrefix(tableName, schema.IndexTables.Prefix) {
 			candidates = append(candidates, schema)
 		}
 	}
 	// WARN we  assume period is always daily. This is only true for boltdb-shipper.
 	var (
-		matched chunk.PeriodConfig
+		matched config.PeriodConfig
 		found   bool
 	)
 	for _, schema := range candidates {

@@ -6,9 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	cortex_distributor "github.com/cortexproject/cortex/pkg/distributor"
-	"github.com/cortexproject/cortex/pkg/tenant"
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
+	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/limiter"
 	"github.com/grafana/dskit/ring"
 	ring_client "github.com/grafana/dskit/ring/client"
@@ -23,21 +21,33 @@ import (
 	"go.uber.org/atomic"
 	"google.golang.org/grpc/health/grpc_health_v1"
 
+	"github.com/grafana/dskit/tenant"
+
+	"github.com/grafana/loki/pkg/distributor/clientpool"
 	"github.com/grafana/loki/pkg/ingester/client"
 	"github.com/grafana/loki/pkg/logproto"
-	"github.com/grafana/loki/pkg/logql"
+	"github.com/grafana/loki/pkg/logql/syntax"
 	"github.com/grafana/loki/pkg/runtime"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/compactor/retention"
+	"github.com/grafana/loki/pkg/usagestats"
 	"github.com/grafana/loki/pkg/util"
+	util_log "github.com/grafana/loki/pkg/util/log"
 	"github.com/grafana/loki/pkg/validation"
 )
 
-var maxLabelCacheSize = 100000
+const (
+	ringKey = "distributor"
+)
+
+var (
+	maxLabelCacheSize = 100000
+	rfStats           = usagestats.NewInt("distributor_replication_factor")
+)
 
 // Config for a Distributor.
 type Config struct {
 	// Distributors ring
-	DistributorRing cortex_distributor.RingConfig `yaml:"ring,omitempty"`
+	DistributorRing RingConfig `yaml:"ring,omitempty"`
 
 	// For testing.
 	factory ring_client.PoolFactory `yaml:"-"`
@@ -62,7 +72,10 @@ type Distributor struct {
 
 	// The global rate limiter requires a distributors ring to count
 	// the number of healthy instances.
-	distributorsRing *ring.Lifecycler
+	distributorsRing       *ring.Ring
+	distributorsLifecycler *ring.Lifecycler
+
+	rateLimitStrat string
 
 	subservices        *services.Manager
 	subservicesWatcher *services.FailureWatcher
@@ -93,19 +106,35 @@ func New(cfg Config, clientCfg client.Config, configs *runtime.TenantConfigs, in
 
 	// Create the configured ingestion rate limit strategy (local or global).
 	var ingestionRateStrategy limiter.RateLimiterStrategy
-	var distributorsRing *ring.Lifecycler
+	var distributorsLifecycler *ring.Lifecycler
+	var distributorsRing *ring.Ring
+	rateLimitStrat := validation.LocalIngestionRateStrategy
 
 	var servs []services.Service
-
 	if overrides.IngestionRateStrategy() == validation.GlobalIngestionRateStrategy {
-		var err error
-		distributorsRing, err = ring.NewLifecycler(cfg.DistributorRing.ToLifecyclerConfig(), nil, "distributor", ring.DistributorRingKey, false, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+		rateLimitStrat = validation.GlobalIngestionRateStrategy
+		ringStore, err := kv.NewClient(
+			cfg.DistributorRing.KVStore,
+			ring.GetCodec(),
+			kv.RegistererWithKVName(prometheus.WrapRegistererWithPrefix("loki_", registerer), "distributor"),
+			util_log.Logger)
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "create distributor KV store client")
 		}
 
-		servs = append(servs, distributorsRing)
-		ingestionRateStrategy = newGlobalIngestionRateStrategy(overrides, distributorsRing)
+		distributorsLifecycler, err = ring.NewLifecycler(cfg.DistributorRing.ToLifecyclerConfig(), nil, "distributor", ringKey, false, util_log.Logger, prometheus.WrapRegistererWithPrefix("cortex_", registerer))
+		if err != nil {
+			return nil, errors.Wrap(err, "create distributor lifecycler")
+		}
+
+		distributorsRing, err = ring.NewWithStoreClientAndStrategy(cfg.DistributorRing.ToRingConfig(),
+			"distributor", "distributor", ringStore, ring.NewIgnoreUnhealthyInstancesReplicationStrategy(), prometheus.WrapRegistererWithPrefix("cortex_", registerer), util_log.Logger)
+		if err != nil {
+			return nil, errors.Wrap(err, "create distributor ring client")
+		}
+
+		servs = append(servs, distributorsLifecycler, distributorsRing)
+		ingestionRateStrategy = newGlobalIngestionRateStrategy(overrides, distributorsLifecycler)
 	} else {
 		ingestionRateStrategy = newLocalIngestionRateStrategy(overrides)
 	}
@@ -115,16 +144,18 @@ func New(cfg Config, clientCfg client.Config, configs *runtime.TenantConfigs, in
 		return nil, err
 	}
 	d := Distributor{
-		cfg:                  cfg,
-		clientCfg:            clientCfg,
-		tenantConfigs:        configs,
-		tenantsRetention:     retention.NewTenantsRetention(overrides),
-		ingestersRing:        ingestersRing,
-		distributorsRing:     distributorsRing,
-		validator:            validator,
-		pool:                 cortex_distributor.NewPool(clientCfg.PoolConfig, ingestersRing, factory, util_log.Logger),
-		ingestionRateLimiter: limiter.NewRateLimiter(ingestionRateStrategy, 10*time.Second),
-		labelCache:           labelCache,
+		cfg:                    cfg,
+		clientCfg:              clientCfg,
+		tenantConfigs:          configs,
+		tenantsRetention:       retention.NewTenantsRetention(overrides),
+		ingestersRing:          ingestersRing,
+		distributorsRing:       distributorsRing,
+		distributorsLifecycler: distributorsLifecycler,
+		validator:              validator,
+		pool:                   clientpool.NewPool(clientCfg.PoolConfig, ingestersRing, factory, util_log.Logger),
+		ingestionRateLimiter:   limiter.NewRateLimiter(ingestionRateStrategy, 10*time.Second),
+		labelCache:             labelCache,
+		rateLimitStrat:         rateLimitStrat,
 		ingesterAppends: promauto.With(registerer).NewCounterVec(prometheus.CounterOpts{
 			Namespace: "loki",
 			Name:      "distributor_ingester_appends_total",
@@ -142,6 +173,7 @@ func New(cfg Config, clientCfg client.Config, configs *runtime.TenantConfigs, in
 		}),
 	}
 	d.replicationFactor.Set(float64(ingestersRing.ReplicationFactor()))
+	rfStats.Set(int64(ingestersRing.ReplicationFactor()))
 
 	servs = append(servs, d.pool)
 	d.subservices, err = services.NewManager(servs...)
@@ -196,18 +228,28 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 		return nil, err
 	}
 
+	// Return early if request does not contain any streams
+	if len(req.Streams) == 0 {
+		return &logproto.PushResponse{}, nil
+	}
+
 	// First we flatten out the request into a list of samples.
 	// We use the heuristic of 1 sample per TS to size the array.
 	// We also work out the hash value at the same time.
 	streams := make([]streamTracker, 0, len(req.Streams))
 	keys := make([]uint32, 0, len(req.Streams))
-	var validationErr error
 	validatedSamplesSize := 0
 	validatedSamplesCount := 0
 
-	validationContext := d.validator.getValidationContextFor(userID)
+	var validationErr error
+	validationContext := d.validator.getValidationContextForTime(time.Now(), userID)
 
 	for _, stream := range req.Streams {
+		// Return early if stream does not contain any entries
+		if len(stream.Entries) == 0 {
+			continue
+		}
+
 		// Truncate first so subsequent steps have consistent line lengths
 		d.truncateLines(validationContext, &stream)
 
@@ -236,16 +278,11 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 		}
 		stream.Entries = stream.Entries[:n]
 
-		if len(stream.Entries) == 0 {
-			continue
-		}
-
 		keys = append(keys, util.TokenFor(userID, stream.Labels))
-		streams = append(streams, streamTracker{
-			stream: stream,
-		})
+		streams = append(streams, streamTracker{stream: stream})
 	}
 
+	// Return early if none of the streams contained entries
 	if len(streams) == 0 {
 		return &logproto.PushResponse{}, validationErr
 	}
@@ -255,7 +292,7 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 		// Return a 429 to indicate to the client they are being rate limited
 		validation.DiscardedSamples.WithLabelValues(validation.RateLimited, userID).Add(float64(validatedSamplesCount))
 		validation.DiscardedBytes.WithLabelValues(validation.RateLimited, userID).Add(float64(validatedSamplesSize))
-		return nil, httpgrpc.Errorf(http.StatusTooManyRequests, validation.RateLimitedErrorMsg, int(d.ingestionRateLimiter.Limit(now, userID)), validatedSamplesCount, validatedSamplesSize)
+		return nil, httpgrpc.Errorf(http.StatusTooManyRequests, validation.RateLimitedErrorMsg, userID, int(d.ingestionRateLimiter.Limit(now, userID)), validatedSamplesCount, validatedSamplesSize)
 	}
 
 	const maxExpectedReplicationSet = 5 // typical replication factor 3 plus one for inactive plus one for luck
@@ -387,7 +424,7 @@ func (d *Distributor) parseStreamLabels(vContext validationContext, key string, 
 	if ok {
 		return labelVal.(string), nil
 	}
-	ls, err := logql.ParseLabels(key)
+	ls, err := syntax.ParseLabels(key)
 	if err != nil {
 		return "", httpgrpc.Errorf(http.StatusBadRequest, validation.InvalidLabelsErrorMsg, key, err)
 	}

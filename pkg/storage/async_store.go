@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-	"github.com/cortexproject/cortex/pkg/util/spanlogger"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/loki/pkg/storage/chunk"
+	"github.com/grafana/loki/pkg/storage/chunk/fetcher"
+	"github.com/grafana/loki/pkg/storage/config"
+	"github.com/grafana/loki/pkg/util/spanlogger"
+
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 type IngesterQuerier interface {
@@ -23,26 +26,28 @@ type IngesterQuerier interface {
 // AsyncStore is meant to be used only in queriers or any other service other than ingesters.
 // It should never be used in ingesters otherwise it would start spiraling around doing queries over and over again to other ingesters.
 type AsyncStore struct {
-	chunk.Store
+	Store
+	scfg                 config.SchemaConfig
 	ingesterQuerier      IngesterQuerier
 	queryIngestersWithin time.Duration
 }
 
-func NewAsyncStore(store chunk.Store, querier IngesterQuerier, queryIngestersWithin time.Duration) *AsyncStore {
+func NewAsyncStore(store Store, scfg config.SchemaConfig, querier IngesterQuerier, queryIngestersWithin time.Duration) *AsyncStore {
 	return &AsyncStore{
 		Store:                store,
+		scfg:                 scfg,
 		ingesterQuerier:      querier,
 		queryIngestersWithin: queryIngestersWithin,
 	}
 }
 
-func (a *AsyncStore) GetChunkRefs(ctx context.Context, userID string, from, through model.Time, matchers ...*labels.Matcher) ([][]chunk.Chunk, []*chunk.Fetcher, error) {
+func (a *AsyncStore) GetChunkRefs(ctx context.Context, userID string, from, through model.Time, matchers ...*labels.Matcher) ([][]chunk.Chunk, []*fetcher.Fetcher, error) {
 	spanLogger := spanlogger.FromContext(ctx)
 
 	errs := make(chan error)
 
 	var storeChunks [][]chunk.Chunk
-	var fetchers []*chunk.Fetcher
+	var fetchers []*fetcher.Fetcher
 	go func() {
 		var err error
 		storeChunks, fetchers, err = a.Store.GetChunkRefs(ctx, userID, from, through, matchers...)
@@ -85,11 +90,11 @@ func (a *AsyncStore) GetChunkRefs(ctx context.Context, userID string, from, thro
 	return a.mergeIngesterAndStoreChunks(userID, storeChunks, fetchers, ingesterChunks)
 }
 
-func (a *AsyncStore) mergeIngesterAndStoreChunks(userID string, storeChunks [][]chunk.Chunk, fetchers []*chunk.Fetcher, ingesterChunkIDs []string) ([][]chunk.Chunk, []*chunk.Fetcher, error) {
-	ingesterChunkIDs = filterDuplicateChunks(storeChunks, ingesterChunkIDs)
+func (a *AsyncStore) mergeIngesterAndStoreChunks(userID string, storeChunks [][]chunk.Chunk, fetchers []*fetcher.Fetcher, ingesterChunkIDs []string) ([][]chunk.Chunk, []*fetcher.Fetcher, error) {
+	ingesterChunkIDs = filterDuplicateChunks(a.scfg, storeChunks, ingesterChunkIDs)
 	level.Debug(util_log.Logger).Log("msg", "post-filtering ingester chunks", "count", len(ingesterChunkIDs))
 
-	fetcherToChunksGroupIdx := make(map[*chunk.Fetcher]int, len(fetchers))
+	fetcherToChunksGroupIdx := make(map[*fetcher.Fetcher]int, len(fetchers))
 
 	for i, fetcher := range fetchers {
 		fetcherToChunksGroupIdx[fetcher] = i
@@ -104,7 +109,7 @@ func (a *AsyncStore) mergeIngesterAndStoreChunks(userID string, storeChunks [][]
 		// ToDo(Sandeep) possible optimization: Keep the chunk fetcher reference handy after first call since it is expected to stay the same.
 		fetcher := a.Store.GetChunkFetcher(chk.Through)
 		if fetcher == nil {
-			return nil, nil, fmt.Errorf("got a nil fetcher for chunk %s", chk.ExternalKey())
+			return nil, nil, fmt.Errorf("got a nil fetcher for chunk %s", a.scfg.ExternalKey(chk.ChunkRef))
 		}
 
 		if _, ok := fetcherToChunksGroupIdx[fetcher]; !ok {
@@ -120,13 +125,13 @@ func (a *AsyncStore) mergeIngesterAndStoreChunks(userID string, storeChunks [][]
 	return storeChunks, fetchers, nil
 }
 
-func filterDuplicateChunks(storeChunks [][]chunk.Chunk, ingesterChunkIDs []string) []string {
+func filterDuplicateChunks(scfg config.SchemaConfig, storeChunks [][]chunk.Chunk, ingesterChunkIDs []string) []string {
 	filteredChunkIDs := make([]string, 0, len(ingesterChunkIDs))
 	seen := make(map[string]struct{}, len(storeChunks))
 
 	for i := range storeChunks {
 		for j := range storeChunks[i] {
-			seen[storeChunks[i][j].ExternalKey()] = struct{}{}
+			seen[scfg.ExternalKey(storeChunks[i][j].ChunkRef)] = struct{}{}
 		}
 	}
 

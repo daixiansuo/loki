@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/log"
 	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/flagext"
@@ -14,15 +13,21 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/loki/pkg/logproto"
-	lokiflag "github.com/grafana/loki/pkg/util/flagext"
-
 	"github.com/grafana/loki/clients/pkg/promtail/api"
 	"github.com/grafana/loki/clients/pkg/promtail/client/fake"
+
+	"github.com/grafana/loki/pkg/logproto"
+	lokiflag "github.com/grafana/loki/pkg/util/flagext"
+	util_log "github.com/grafana/loki/pkg/util/log"
+)
+
+var (
+	nilMetrics = NewMetrics(nil, nil)
+	metrics    = NewMetrics(prometheus.DefaultRegisterer, nil)
 )
 
 func TestNewMulti(t *testing.T) {
-	_, err := NewMulti(nil, util_log.Logger, []Config{}...)
+	_, err := NewMulti(nilMetrics, nil, util_log.Logger, []Config{}...)
 	if err == nil {
 		t.Fatal("expected err but got nil")
 	}
@@ -41,10 +46,49 @@ func TestNewMulti(t *testing.T) {
 		ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"hi": "there"}},
 	}
 
-	clients, err := NewMulti(prometheus.DefaultRegisterer, util_log.Logger, cc1, cc2)
+	clients, err := NewMulti(metrics, nil, util_log.Logger, cc1, cc2)
 	if err != nil {
 		t.Fatalf("expected err: nil got:%v", err)
 	}
+	multi := clients.(*MultiClient)
+	if len(multi.clients) != 2 {
+		t.Fatalf("expected client: 2 got:%d", len(multi.clients))
+	}
+	actualCfg1 := clients.(*MultiClient).clients[0].(*client).cfg
+	// Yaml should overridden the command line so 'order: yaml' should be expected
+	expectedCfg1 := Config{
+		BatchSize:      20,
+		BatchWait:      1 * time.Second,
+		URL:            flagext.URLValue{URL: host1},
+		ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"order": "yaml"}},
+	}
+
+	if !reflect.DeepEqual(actualCfg1, expectedCfg1) {
+		t.Fatalf("expected cfg: %v got:%v", expectedCfg1, actualCfg1)
+	}
+}
+
+func TestNewMulti_BlockDuplicates(t *testing.T) {
+	_, err := NewMulti(nilMetrics, nil, util_log.Logger, []Config{}...)
+	if err == nil {
+		t.Fatal("expected err but got nil")
+	}
+	host1, _ := url.Parse("http://localhost:3100")
+	cc1 := Config{
+		BatchSize:      20,
+		BatchWait:      1 * time.Second,
+		URL:            flagext.URLValue{URL: host1},
+		ExternalLabels: lokiflag.LabelSet{LabelSet: model.LabelSet{"order": "yaml"}},
+	}
+	cc1Copy := cc1
+
+	_, err = NewMulti(metrics, nil, util_log.Logger, cc1, cc1Copy)
+	require.Error(t, err, "expected NewMulti to reject duplicate client configs")
+
+	cc1Copy.Name = "copy"
+	clients, err := NewMulti(metrics, nil, util_log.Logger, cc1, cc1Copy)
+	require.NoError(t, err, "expected NewMulti to reject duplicate client configs")
+
 	multi := clients.(*MultiClient)
 	if len(multi.clients) != 2 {
 		t.Fatalf("expected client: 2 got:%d", len(multi.clients))
@@ -104,9 +148,9 @@ func TestMultiClient_Handle(t *testing.T) {
 func TestMultiClient_Handle_Race(t *testing.T) {
 	u := flagext.URLValue{}
 	require.NoError(t, u.Set("http://localhost"))
-	c1, err := New(nil, Config{URL: u, BackoffConfig: backoff.Config{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
+	c1, err := New(nilMetrics, Config{URL: u, BackoffConfig: backoff.Config{MaxRetries: 1}, Timeout: time.Microsecond}, nil, log.NewNopLogger())
 	require.NoError(t, err)
-	c2, err := New(nil, Config{URL: u, BackoffConfig: backoff.Config{MaxRetries: 1}, Timeout: time.Microsecond}, log.NewNopLogger())
+	c2, err := New(nilMetrics, Config{URL: u, BackoffConfig: backoff.Config{MaxRetries: 1}, Timeout: time.Microsecond}, nil, log.NewNopLogger())
 	require.NoError(t, err)
 	clients := []Client{c1, c2}
 	m := &MultiClient{

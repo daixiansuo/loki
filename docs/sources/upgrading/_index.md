@@ -31,6 +31,74 @@ The output is incredibly verbose as it shows the entire internal config struct u
 
 ## Main / Unreleased
 
+## 2.5.0
+
+### Loki
+
+#### `split_queries_by_interval` yaml configuration has moved.
+
+It was previously possible to define this value in two places
+
+```yaml
+query_range:
+  split_queries_by_interval: 10m
+```
+
+and/or
+
+```
+limits_config:
+  split_queries_by_interval: 10m
+```
+
+In 2.5.0 it can only be defined in the `limits_config` section, **Loki will fail to start if you do not remove the `split_queries_by_interval` config from the `query_range` section.** 
+
+Additionally, it has a new default value of `30m` rather than `0`.
+
+The CLI flag is not changed and remains `querier.split-queries-by-interval`.
+
+#### Dropped support for old Prometheus rules configuration format
+
+Alerting rules previously could be specified in two formats: 1.x format (legacy one, named `v0` internally) and 2.x.
+We decided to drop support for format `1.x` as it is fairly old and keeping support for it required a lot of code.
+
+In case you're still using the legacy format, take a look at
+[Alerting Rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/) for instructions
+on how to write alerting rules in the new format.
+
+For reference, the newer format follows a structure similar to the one below:
+```yaml
+ groups:
+ - name: example
+   rules:
+   - alert: HighErrorRate
+     expr: job:request_latency_seconds:mean5m{job="myjob"} > 0.5
+     for: 10m
+     labels:
+       severity: page
+     annotations:
+       summary: High request latency
+```
+
+Meanwhile, the legacy format is a string in the following format:
+```
+ ALERT <alert name>
+   IF <expression>
+   [ FOR <duration> ]
+   [ LABELS <label set> ]
+   [ ANNOTATIONS <label set> ]
+```
+
+#### Changes to default configuration values
+
+* `parallelise_shardable_queries` under the `query_range` config now defaults to `true`.
+* `split_queries_by_interval` under the `limits_config` config now defaults to `30m`, it was `0s`.
+* `max_chunk_age` in the `ingester` config now defaults to `2h` previously it was `1h`.
+* `query_ingesters_within` under the `querier` config now defaults to `3h`, previously it was `0s`. Any query (or subquery) that has an end time more than `3h` ago will not be sent to the ingesters, this saves work on the ingesters for data they normally don't contain. If you regularly write old data to Loki you may need to return this value to `0s` to always query ingesters. 
+* `max_concurrent` under the `querier` config now defaults to `10` instead of `20`.
+* `match_max_concurrent` under the `frontend_worker` config now defaults to true, this supersedes the `parallelism` setting which can now be removed from your config. Controlling query parallelism of a single process can now be done with the `querier` `max_concurrent` setting.
+* `flush_op_timeout` under the `ingester` configuration block now defaults to `10m`, increased from `10s`. This can help when replaying a large WAL on Loki startup, and avoid `msg="failed to flush user" ... context deadline exceeded` errors.
+
 ### Promtail
 
 #### `gcplog` labels have changed
@@ -38,6 +106,31 @@ The output is incredibly verbose as it shows the entire internal config struct u
   - Resource labels have been moved from `__<NAME>` to `__gcp_resource_labels_<NAME>`
     e.g. if you previously used `__project_id` then you'll need to update your relabel config to use `__gcp_resource_labels_project_id`.
   - `resource_type` has been moved to `__gcp_resource_type`
+
+#### `promtail_log_entries_bytes_bucket` histogram has been removed.
+
+This histogram reports the distribution of log line sizes by file. It has 8 buckets for every file being tailed.
+
+This creates a lot of series and we don't think this metric has enough value to offset the amount of series genereated so we are removing it.
+
+While this isn't a direct replacement, two metrics we find more useful are size and line counters configured via pipeline stages, an example of how to configure these metrics can be found in the [metrics pipeline stage docs](https://grafana.com/docs/loki/latest/clients/promtail/stages/metrics/#counter)
+
+### Jsonnet
+
+#### Compactor config defined as command line args moved to yaml config
+
+Following 2 compactor configs that were defined as command line arguments in jsonnet are now moved to yaml config:
+
+```yaml
+# Directory where files can be downloaded for compaction.
+# CLI flag: -boltdb.shipper.compactor.working-directory
+[working_directory: <string>]
+
+# The shared store used for storing boltdb files.
+# Supported types: gcs, s3, azure, swift, filesystem.
+# CLI flag: -boltdb.shipper.compactor.shared-store
+[shared_store: <string>]
+```
 
 ## 2.4.0
 
@@ -113,9 +206,9 @@ present in your Loki config: `ingestion_rate_strategy`, `max_global_streams_per_
 
 | config | new default | old default|
 | --- | --- | --- |
-| chunk_retain_period | 30s | 0s |
-| chunk_idle_period | 1h | 30m |
-| chunk_target_size | 1048576 | 1572864 |
+| chunk_retain_period | 0s | 30s |
+| chunk_idle_period | 30m | 1h |
+| chunk_target_size | 1572864 | 1048576 |
 
 * chunk_retain_period is necessary when using an index queries cache which is not enabled by default. If you have configured an index_queries_cache_config section make sure that you set chunk_retain_period larger than your cache TTL
 * chunk_idle_period is how long before a chunk which receives no logs is flushed.

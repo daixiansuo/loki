@@ -14,18 +14,17 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/grafana/loki/pkg/storage/chunk/encoding"
 
 	"github.com/grafana/loki/pkg/chunkenc/testdata"
 	"github.com/grafana/loki/pkg/iter"
 	"github.com/grafana/loki/pkg/logproto"
-	"github.com/grafana/loki/pkg/logql"
 	"github.com/grafana/loki/pkg/logql/log"
+	"github.com/grafana/loki/pkg/logql/syntax"
 	"github.com/grafana/loki/pkg/logqlmodel/stats"
+	"github.com/grafana/loki/pkg/storage/chunk"
 )
 
 var testEncoding = []Encoding{
@@ -567,7 +566,7 @@ func TestChunkStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	// test on a chunk filling up
-	s := statsCtx.Result(time.Since(first))
+	s := statsCtx.Result(time.Since(first), 0)
 	require.Equal(t, int64(expectedSize), s.Summary.TotalBytesProcessed)
 	require.Equal(t, int64(inserted), s.Summary.TotalLinesProcessed)
 
@@ -594,7 +593,7 @@ func TestChunkStats(t *testing.T) {
 	if err := it.Close(); err != nil {
 		t.Fatal(err)
 	}
-	s = statsCtx.Result(time.Since(first))
+	s = statsCtx.Result(time.Since(first), 0)
 	require.Equal(t, int64(expectedSize), s.Summary.TotalBytesProcessed)
 	require.Equal(t, int64(inserted), s.Summary.TotalLinesProcessed)
 
@@ -677,6 +676,7 @@ func BenchmarkWrite(b *testing.B) {
 
 type nomatchPipeline struct{}
 
+func (nomatchPipeline) BaseLabels() log.LabelsResult                         { return log.EmptyLabelsResult }
 func (nomatchPipeline) Process(line []byte) ([]byte, log.LabelsResult, bool) { return line, nil, false }
 func (nomatchPipeline) ProcessString(line string) (string, log.LabelsResult, bool) {
 	return line, nil, false
@@ -1036,7 +1036,7 @@ func BenchmarkBufferedIteratorLabels(b *testing.B) {
 			} {
 				b.Run(test, func(b *testing.B) {
 					b.ReportAllocs()
-					expr, err := logql.ParseLogSelector(test, true)
+					expr, err := syntax.ParseLogSelector(test, true)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -1075,7 +1075,7 @@ func BenchmarkBufferedIteratorLabels(b *testing.B) {
 			} {
 				b.Run(test, func(b *testing.B) {
 					b.ReportAllocs()
-					expr, err := logql.ParseSampleExpr(test)
+					expr, err := syntax.ParseSampleExpr(test)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -1118,7 +1118,7 @@ func Test_HeadIteratorReverse(t *testing.T) {
 			}
 
 			assertOrder := func(t *testing.T, total int64) {
-				expr, err := logql.ParseLogSelector(`{app="foo"} | logfmt`, true)
+				expr, err := syntax.ParseLogSelector(`{app="foo"} | logfmt`, true)
 				require.NoError(t, err)
 				p, err := expr.Pipeline()
 				require.NoError(t, err)
@@ -1175,7 +1175,7 @@ func TestMemChunk_Rebound(t *testing.T) {
 		},
 		{
 			name:      "slice out of bounds without overlap",
-			err:       encoding.ErrSliceNoDataInRange,
+			err:       chunk.ErrSliceNoDataInRange,
 			sliceFrom: chkThrough.Add(time.Minute),
 			sliceTo:   chkThrough.Add(time.Hour),
 		},

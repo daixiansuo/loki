@@ -2,15 +2,14 @@ package deletion
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/loki/pkg/storage/chunk"
-	"github.com/grafana/loki/pkg/storage/chunk/local"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
+	"github.com/grafana/loki/pkg/storage/stores/series/index"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/storage"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/testutil"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/util"
@@ -18,11 +17,7 @@ import (
 
 func TestDeleteRequestsTable(t *testing.T) {
 	// build test table
-	tempDir, err := ioutil.TempDir("", "test-delete-requests-table")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(tempDir))
-	}()
+	tempDir := t.TempDir()
 
 	workingDir := filepath.Join(tempDir, "working-dir")
 	objectStorePath := filepath.Join(tempDir, "object-store")
@@ -45,7 +40,7 @@ func TestDeleteRequestsTable(t *testing.T) {
 	require.NoError(t, testDeleteRequestsTable.BatchWrite(context.Background(), batch))
 
 	// see if right records were written
-	testutil.TestSingleDBQuery(t, chunk.IndexQuery{}, testDeleteRequestsTable.db, testDeleteRequestsTable.boltdbIndexClient, 0, 10)
+	testutil.TestSingleDBQuery(t, index.Query{}, testDeleteRequestsTable.db, local.IndexBucketName, testDeleteRequestsTable.boltdbIndexClient, 0, 10)
 
 	// upload the file to the storage
 	require.NoError(t, testDeleteRequestsTable.uploadFile())
@@ -78,18 +73,12 @@ func TestDeleteRequestsTable(t *testing.T) {
 	require.NotEmpty(t, testDeleteRequestsTable.dbPath)
 
 	// validate records in local db
-	testutil.TestSingleDBQuery(t, chunk.IndexQuery{}, testDeleteRequestsTable.db, testDeleteRequestsTable.boltdbIndexClient, 0, 20)
+	testutil.TestSingleDBQuery(t, index.Query{}, testDeleteRequestsTable.db, local.IndexBucketName, testDeleteRequestsTable.boltdbIndexClient, 0, 20)
 }
 
 func checkRecordsInStorage(t *testing.T, storageFilePath string, start, numRecords int) {
-	tempDir, err := ioutil.TempDir("", "compare-delete-requests-db")
-	require.NoError(t, err)
-
-	defer func() {
-		require.NoError(t, os.RemoveAll(tempDir))
-	}()
+	tempDir := t.TempDir()
 	tempFilePath := filepath.Join(tempDir, DeleteRequestsTableName)
-	require.NoError(t, err)
 	testutil.DecompressFile(t, storageFilePath, tempFilePath)
 
 	tempDB, err := util.SafeOpenBoltdbFile(tempFilePath)
@@ -104,5 +93,5 @@ func checkRecordsInStorage(t *testing.T, storageFilePath string, start, numRecor
 
 	defer boltdbIndexClient.Stop()
 
-	testutil.TestSingleDBQuery(t, chunk.IndexQuery{}, tempDB, boltdbIndexClient, start, numRecords)
+	testutil.TestSingleDBQuery(t, index.Query{}, tempDB, local.IndexBucketName, boltdbIndexClient, start, numRecords)
 }

@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -29,15 +28,17 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/opentracing/opentracing-go"
+	"github.com/grafana/regexp"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/uber/jaeger-client-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/timestamp"
-	"github.com/prometheus/prometheus/pkg/value"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/timestamp"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/stats"
@@ -87,12 +88,15 @@ type (
 func (e ErrQueryTimeout) Error() string {
 	return fmt.Sprintf("query timed out in %s", string(e))
 }
+
 func (e ErrQueryCanceled) Error() string {
 	return fmt.Sprintf("query was canceled in %s", string(e))
 }
+
 func (e ErrTooManySamples) Error() string {
 	return fmt.Sprintf("query processing would load too many samples into memory in %s", string(e))
 }
+
 func (e ErrStorage) Error() string {
 	return e.Err.Error()
 }
@@ -175,8 +179,8 @@ func (q *query) Close() {
 
 // Exec implements the Query interface.
 func (q *query) Exec(ctx context.Context) *Result {
-	if span := opentracing.SpanFromContext(ctx); span != nil {
-		span.SetTag(queryTag, q.stmt.String())
+	if span := trace.SpanFromContext(ctx); span != nil {
+		span.SetAttributes(attribute.String(queryTag, q.stmt.String()))
 	}
 
 	// Exec query.
@@ -204,13 +208,32 @@ func contextErr(err error, env string) error {
 	}
 }
 
+// QueryTracker provides access to two features:
+//
+// 1) Tracking of active query. If PromQL engine crashes while executing any query, such query should be present
+// in the tracker on restart, hence logged. After the logging on restart, the tracker gets emptied.
+//
+// 2) Enforcement of the maximum number of concurrent queries.
+type QueryTracker interface {
+	// GetMaxConcurrent returns maximum number of concurrent queries that are allowed by this tracker.
+	GetMaxConcurrent() int
+
+	// Insert inserts query into query tracker. This call must block if maximum number of queries is already running.
+	// If Insert doesn't return error then returned integer value should be used in subsequent Delete call.
+	// Insert should return error if context is finished before query can proceed, and integer value returned in this case should be ignored by caller.
+	Insert(ctx context.Context, query string) (int, error)
+
+	// Delete removes query from activity tracker. InsertIndex is value returned by Insert call.
+	Delete(insertIndex int)
+}
+
 // EngineOpts contains configuration options used when creating a new Engine.
 type EngineOpts struct {
 	Logger             log.Logger
 	Reg                prometheus.Registerer
 	MaxSamples         int
 	Timeout            time.Duration
-	ActiveQueryTracker *ActiveQueryTracker
+	ActiveQueryTracker QueryTracker
 	// LookbackDelta determines the time since the last sample after which a time
 	// series is considered stale.
 	LookbackDelta time.Duration
@@ -219,10 +242,17 @@ type EngineOpts struct {
 	// a subquery in milliseconds if no step in range vector was specified `[30m:<step>]`.
 	NoStepSubqueryIntervalFn func(rangeMillis int64) int64
 
-	// EnableAtModifier if true enables @ modifier. Disabled otherwise.
+	// EnableAtModifier if true enables @ modifier. Disabled otherwise. This
+	// is supposed to be enabled for regular PromQL (as of Prometheus v2.33)
+	// but the option to disable it is still provided here for those using
+	// the Engine outside of Prometheus.
 	EnableAtModifier bool
 
-	// EnableNegativeOffset if true enables negative (-) offset values. Disabled otherwise.
+	// EnableNegativeOffset if true enables negative (-) offset
+	// values. Disabled otherwise. This is supposed to be enabled for
+	// regular PromQL (as of Prometheus v2.33) but the option to disable it
+	// is still provided here for those using the Engine outside of
+	// Prometheus.
 	EnableNegativeOffset bool
 }
 
@@ -233,7 +263,7 @@ type Engine struct {
 	metrics                  *engineMetrics
 	timeout                  time.Duration
 	maxSamplesPerQuery       int
-	activeQueryTracker       *ActiveQueryTracker
+	activeQueryTracker       QueryTracker
 	queryLogger              QueryLogger
 	queryLoggerLock          sync.RWMutex
 	lookbackDelta            time.Duration
@@ -402,8 +432,10 @@ func (ng *Engine) newQuery(q storage.Queryable, expr parser.Expr, start, end tim
 	return qry, nil
 }
 
-var ErrValidationAtModifierDisabled = errors.New("@ modifier is disabled")
-var ErrValidationNegativeOffsetDisabled = errors.New("negative offset is disabled")
+var (
+	ErrValidationAtModifierDisabled     = errors.New("@ modifier is disabled")
+	ErrValidationNegativeOffsetDisabled = errors.New("negative offset is disabled")
+)
 
 func (ng *Engine) validateOpts(expr parser.Expr) error {
 	if ng.enableAtModifier && ng.enableNegativeOffset {
@@ -493,10 +525,8 @@ func (ng *Engine) exec(ctx context.Context, q *query) (v parser.Value, ws storag
 				f = append(f, "error", err)
 			}
 			f = append(f, "stats", stats.NewQueryStats(q.Stats()))
-			if span := opentracing.SpanFromContext(ctx); span != nil {
-				if spanCtx, ok := span.Context().(jaeger.SpanContext); ok {
-					f = append(f, "spanID", spanCtx.SpanID())
-				}
+			if span := trace.SpanFromContext(ctx); span != nil {
+				f = append(f, "spanID", span.SpanContext().SpanID())
 			}
 			if origin := ctx.Value(QueryOrigin{}); origin != nil {
 				for k, v := range origin.(map[string]interface{}) {
@@ -1159,8 +1189,9 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 	numSteps := int((ev.endTimestamp-ev.startTimestamp)/ev.interval) + 1
 
 	// Create a new span to help investigate inner evaluation performances.
-	span, _ := opentracing.StartSpanFromContext(ev.ctx, stats.InnerEvalTime.SpanOperation()+" eval "+reflect.TypeOf(expr).String())
-	defer span.Finish()
+	ctxWithSpan, span := otel.Tracer("").Start(ev.ctx, stats.InnerEvalTime.SpanOperation()+" eval "+reflect.TypeOf(expr).String())
+	ev.ctx = ctxWithSpan
+	defer span.End()
 
 	switch e := expr.(type) {
 	case *parser.AggregateExpr:
@@ -1175,7 +1206,9 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 		}
 
 		unwrapParenExpr(&e.Param)
-		if s, ok := unwrapStepInvariantExpr(e.Param).(*parser.StringLiteral); ok {
+		param := unwrapStepInvariantExpr(e.Param)
+		unwrapParenExpr(&param)
+		if s, ok := param.(*parser.StringLiteral); ok {
 			return ev.rangeEval(initSeries, func(v []parser.Value, sh [][]EvalSeriesHelper, enh *EvalNodeHelper) (Vector, storage.Warnings) {
 				return ev.aggregation(e.Op, sortedGrouping, e.Without, s.Val, v[0].(Vector), sh[0], enh), nil
 			}, e.Expr)
@@ -1197,6 +1230,7 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 			// a vector selector.
 			unwrapParenExpr(&e.Args[0])
 			arg := unwrapStepInvariantExpr(e.Args[0])
+			unwrapParenExpr(&arg)
 			vs, ok := arg.(*parser.VectorSelector)
 			if ok {
 				return ev.rangeEval(nil, func(v []parser.Value, _ [][]EvalSeriesHelper, enh *EvalNodeHelper) (Vector, storage.Warnings) {
@@ -1220,6 +1254,7 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 		for i := range e.Args {
 			unwrapParenExpr(&e.Args[i])
 			a := unwrapStepInvariantExpr(e.Args[i])
+			unwrapParenExpr(&a)
 			if _, ok := a.(*parser.MatrixSelector); ok {
 				matrixArgIndex = i
 				matrixArg = true
@@ -1262,7 +1297,10 @@ func (ev *evaluator) eval(expr parser.Expr) (parser.Value, storage.Warnings) {
 			}
 		}
 
-		sel := unwrapStepInvariantExpr(e.Args[matrixArgIndex]).(*parser.MatrixSelector)
+		unwrapParenExpr(&e.Args[matrixArgIndex])
+		arg := unwrapStepInvariantExpr(e.Args[matrixArgIndex])
+		unwrapParenExpr(&arg)
+		sel := arg.(*parser.MatrixSelector)
 		selVS := sel.VectorSelector.(*parser.VectorSelector)
 
 		ws, err := checkAndExpandSeriesSet(ev.ctx, sel)
@@ -1631,7 +1669,7 @@ func (ev *evaluator) vectorSelectorSingle(it *storage.MemoizedSeriesIterator, no
 	}
 
 	if ok {
-		t, v = it.Values()
+		t, v = it.At()
 	}
 
 	if !ok || t > refTime {
@@ -1751,7 +1789,7 @@ func (ev *evaluator) matrixIterSlice(it *storage.BufferedSeriesIterator, mint, m
 	}
 	// The seeked sample might also be in the range.
 	if ok {
-		t, v := it.Values()
+		t, v := it.At()
 		if t == maxt && !value.IsStaleNaN(v) {
 			if ev.currentSamples >= ev.maxSamples {
 				ev.error(ErrTooManySamples(env))
@@ -1792,9 +1830,11 @@ func (ev *evaluator) VectorOr(lhs, rhs Vector, matching *parser.VectorMatching, 
 		panic("set operations must only use many-to-many matching")
 	}
 	if len(lhs) == 0 { // Short-circuit.
-		return rhs
+		enh.Out = append(enh.Out, rhs...)
+		return enh.Out
 	} else if len(rhs) == 0 {
-		return lhs
+		enh.Out = append(enh.Out, lhs...)
+		return enh.Out
 	}
 
 	leftSigs := map[string]struct{}{}
@@ -1819,7 +1859,8 @@ func (ev *evaluator) VectorUnless(lhs, rhs Vector, matching *parser.VectorMatchi
 	// Short-circuit: empty rhs means we will return everything in lhs;
 	// empty lhs means we will return empty - don't need to build a map.
 	if len(lhs) == 0 || len(rhs) == 0 {
-		return lhs
+		enh.Out = append(enh.Out, lhs...)
+		return enh.Out
 	}
 
 	rightSigs := map[string]struct{}{}
@@ -2085,6 +2126,8 @@ func scalarBinop(op parser.ItemType, lhs, rhs float64) float64 {
 		return btos(lhs >= rhs)
 	case parser.LTE:
 		return btos(lhs <= rhs)
+	case parser.ATAN2:
+		return math.Atan2(lhs, rhs)
 	}
 	panic(errors.Errorf("operator %q not allowed for Scalar operations", op))
 }
@@ -2134,8 +2177,8 @@ type groupedAggregation struct {
 // aggregation evaluates an aggregation operation on a Vector. The provided grouping labels
 // must be sorted.
 func (ev *evaluator) aggregation(op parser.ItemType, grouping []string, without bool, param interface{}, vec Vector, seriesHelper []EvalSeriesHelper, enh *EvalNodeHelper) Vector {
-
 	result := map[uint64]*groupedAggregation{}
+	orderedResult := []*groupedAggregation{}
 	var k int64
 	if op == parser.TOPK || op == parser.BOTTOMK {
 		f := param.(float64)
@@ -2204,12 +2247,16 @@ func (ev *evaluator) aggregation(op parser.ItemType, grouping []string, without 
 			} else {
 				m = metric.WithLabels(grouping...)
 			}
-			result[groupingKey] = &groupedAggregation{
+			newAgg := &groupedAggregation{
 				labels:     m,
 				value:      s.V,
 				mean:       s.V,
 				groupCount: 1,
 			}
+
+			result[groupingKey] = newAgg
+			orderedResult = append(orderedResult, newAgg)
+
 			inputVecLen := int64(len(vec))
 			resultSize := k
 			if k > inputVecLen {
@@ -2331,7 +2378,7 @@ func (ev *evaluator) aggregation(op parser.ItemType, grouping []string, without 
 	}
 
 	// Construct the result Vector from the aggregated groups.
-	for _, aggr := range result {
+	for _, aggr := range orderedResult {
 		switch op {
 		case parser.AVG:
 			aggr.value = aggr.mean
@@ -2499,7 +2546,6 @@ func preprocessExprHelper(expr parser.Expr, start, end time.Time) bool {
 		}
 
 		if isStepInvariant {
-
 			// The function and all arguments are step invariant.
 			return true
 		}
@@ -2545,12 +2591,6 @@ func preprocessExprHelper(expr parser.Expr, start, end time.Time) bool {
 }
 
 func newStepInvariantExpr(expr parser.Expr) parser.Expr {
-	if e, ok := expr.(*parser.ParenExpr); ok {
-		// Wrapping the inside of () makes it easy to unwrap the paren later.
-		// But this effectively unwraps the paren.
-		return newStepInvariantExpr(e.Expr)
-
-	}
 	return &parser.StepInvariantExpr{Expr: expr}
 }
 

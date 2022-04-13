@@ -4,23 +4,17 @@ import (
 	"bytes"
 	"context"
 	"io/ioutil"
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/loki/pkg/storage/chunk/local"
-	"github.com/grafana/loki/pkg/storage/chunk/util"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
+	"github.com/grafana/loki/pkg/storage/chunk/client/util"
 )
 
 func TestIndexStorageClient(t *testing.T) {
-	tempDir, err := ioutil.TempDir("", "test-index-storage-client")
-	require.NoError(t, err)
-
-	defer func() {
-		require.NoError(t, os.RemoveAll(tempDir))
-	}()
+	tempDir := t.TempDir()
 
 	storageKeyPrefix := "prefix/"
 	tablesToSetup := map[string][]string{
@@ -34,7 +28,7 @@ func TestIndexStorageClient(t *testing.T) {
 	for tableName, files := range tablesToSetup {
 		require.NoError(t, util.EnsureDirectory(filepath.Join(tempDir, storageKeyPrefix, tableName)))
 		for _, file := range files {
-			err := ioutil.WriteFile(filepath.Join(tempDir, storageKeyPrefix, tableName, file), []byte(tableName+file), 0666)
+			err := ioutil.WriteFile(filepath.Join(tempDir, storageKeyPrefix, tableName, file), []byte(tableName+file), 0o666)
 			require.NoError(t, err)
 		}
 	}
@@ -49,7 +43,7 @@ func TestIndexStorageClient(t *testing.T) {
 			expectedFiles, ok := tablesToSetup[table]
 			require.True(t, ok)
 
-			filesInStorage, err := indexStorageClient.ListFiles(context.Background(), table)
+			filesInStorage, _, err := indexStorageClient.ListFiles(context.Background(), table)
 			require.NoError(t, err)
 			require.Len(t, filesInStorage, len(expectedFiles))
 

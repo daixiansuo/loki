@@ -4,8 +4,10 @@ local utils = import 'mixin-utils/utils.libsonnet';
   grafanaDashboards+:
     {
       'loki-writes-resources.json':
-        $.dashboard('Loki / Writes Resources')
-        .addClusterSelectorTemplates(false)
+        $.dashboard('Loki / Writes Resources', uid='writes-resources')
+        .addCluster()
+        .addNamespace()
+        .addTag()
         .addRow(
           $.row('Gateway')
           .addPanel(
@@ -76,9 +78,7 @@ local utils = import 'mixin-utils/utils.libsonnet';
             { yaxes: $.yaxes('Bps') },
           )
           .addPanel(
-            $.panel('Disk Space Utilization') +
-            $.queryPanel('max by(persistentvolumeclaim) (kubelet_volume_stats_used_bytes{%s} / kubelet_volume_stats_capacity_bytes{%s}) and count by(persistentvolumeclaim) (kube_persistentvolumeclaim_labels{%s,label_name=~"ingester.*"})' % [$.namespaceMatcher(), $.namespaceMatcher(), $.namespaceMatcher()], '{{persistentvolumeclaim}}') +
-            { yaxes: $.yaxes('percentunit') },
+            $.containerDiskSpaceUtilizationPanel('Disk Space Utilization', 'ingester'),
           )
         ),
     },

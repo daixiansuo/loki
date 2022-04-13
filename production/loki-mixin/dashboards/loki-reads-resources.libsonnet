@@ -4,8 +4,10 @@ local utils = import 'mixin-utils/utils.libsonnet';
   grafanaDashboards+:
     {
       'loki-reads-resources.json':
-        ($.dashboard('Loki / Reads Resources'))
-        .addClusterSelectorTemplates(false)
+        ($.dashboard('Loki / Reads Resources', uid='reads-resources'))
+        .addCluster()
+        .addNamespace()
+        .addTag()
         .addRow(
           $.row('Gateway')
           .addPanel(
@@ -63,9 +65,7 @@ local utils = import 'mixin-utils/utils.libsonnet';
             { yaxes: $.yaxes('Bps') },
           )
           .addPanel(
-            $.panel('Disk Space Utilization') +
-            $.queryPanel('max by(persistentvolumeclaim) (kubelet_volume_stats_used_bytes{%s} / kubelet_volume_stats_capacity_bytes{%s}) and count by(persistentvolumeclaim) (kube_persistentvolumeclaim_labels{%s,label_name=~"querier.*"})' % [$.namespaceMatcher(), $.namespaceMatcher(), $.namespaceMatcher()], '{{persistentvolumeclaim}}') +
-            { yaxes: $.yaxes('percentunit') },
+            $.containerDiskSpaceUtilizationPanel('Disk Space Utilization', 'querier'),
           )
         )
         .addRow(
@@ -101,9 +101,7 @@ local utils = import 'mixin-utils/utils.libsonnet';
             { yaxes: $.yaxes('Bps') },
           )
           .addPanel(
-            $.panel('Disk Space Utilization') +
-            $.queryPanel('max by(persistentvolumeclaim) (kubelet_volume_stats_used_bytes{%s} / kubelet_volume_stats_capacity_bytes{%s}) and count by(persistentvolumeclaim) (kube_persistentvolumeclaim_labels{%s,label_name=~"index-gateway.*"})' % [$.namespaceMatcher(), $.namespaceMatcher(), $.namespaceMatcher()], '{{persistentvolumeclaim}}') +
-            { yaxes: $.yaxes('percentunit') },
+            $.containerDiskSpaceUtilizationPanel('Disk Space Utilization', 'index-gateway'),
           )
         )
         .addRow(

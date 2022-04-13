@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/stretchr/testify/require"
+
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 func TestResult(t *testing.T) {
@@ -25,7 +26,7 @@ func TestResult(t *testing.T) {
 	fakeIngesterQuery(ctx)
 	fakeIngesterQuery(ctx)
 
-	res := stats.Result(2 * time.Second)
+	res := stats.Result(2*time.Second, 2*time.Nanosecond)
 	res.Log(util_log.Logger)
 	expected := Result{
 		Ingester: Ingester{
@@ -61,10 +62,12 @@ func TestResult(t *testing.T) {
 		},
 		Summary: Summary{
 			ExecTime:                2 * time.Second.Seconds(),
+			QueueTime:               2 * time.Nanosecond.Seconds(),
 			BytesProcessedPerSecond: int64(42),
 			LinesProcessedPerSecond: int64(50),
 			TotalBytesProcessed:     int64(84),
 			TotalLinesProcessed:     int64(100),
+			Subqueries:              1,
 		},
 	}
 	require.Equal(t, expected, res)
@@ -106,15 +109,17 @@ func TestSnapshot_JoinResults(t *testing.T) {
 		},
 		Summary: Summary{
 			ExecTime:                2 * time.Second.Seconds(),
+			QueueTime:               2 * time.Nanosecond.Seconds(),
 			BytesProcessedPerSecond: int64(42),
 			LinesProcessedPerSecond: int64(50),
 			TotalBytesProcessed:     int64(84),
 			TotalLinesProcessed:     int64(100),
+			Subqueries:              2,
 		},
 	}
 
 	JoinResults(ctx, expected)
-	res := statsCtx.Result(2 * time.Second)
+	res := statsCtx.Result(2*time.Second, 2*time.Nanosecond)
 	require.Equal(t, expected, res)
 }
 
@@ -177,6 +182,7 @@ func TestResult_Merge(t *testing.T) {
 		},
 		Summary: Summary{
 			ExecTime:                2 * time.Second.Seconds(),
+			QueueTime:               2 * time.Nanosecond.Seconds(),
 			BytesProcessedPerSecond: int64(42),
 			LinesProcessedPerSecond: int64(50),
 			TotalBytesProcessed:     int64(84),
@@ -185,6 +191,7 @@ func TestResult_Merge(t *testing.T) {
 	}
 
 	res.Merge(toMerge)
+	toMerge.Summary.Subqueries = 2
 	require.Equal(t, toMerge, res)
 
 	// merge again
@@ -223,10 +230,12 @@ func TestResult_Merge(t *testing.T) {
 		},
 		Summary: Summary{
 			ExecTime:                2 * 2 * time.Second.Seconds(),
+			QueueTime:               2 * 2 * time.Nanosecond.Seconds(),
 			BytesProcessedPerSecond: int64(42), // 2 requests at the same pace should give the same bytes/lines per sec
 			LinesProcessedPerSecond: int64(50),
 			TotalBytesProcessed:     2 * int64(84),
 			TotalLinesProcessed:     2 * int64(100),
+			Subqueries:              3,
 		},
 	}, res)
 }
@@ -234,10 +243,11 @@ func TestResult_Merge(t *testing.T) {
 func TestReset(t *testing.T) {
 	statsCtx, ctx := NewContext(context.Background())
 	fakeIngesterQuery(ctx)
-	res := statsCtx.Result(2 * time.Second)
+	res := statsCtx.Result(2*time.Second, 2*time.Millisecond)
 	require.NotEmpty(t, res)
 	statsCtx.Reset()
-	res = statsCtx.Result(0)
+	res = statsCtx.Result(0, 0)
+	res.Summary.Subqueries = 0
 	require.Empty(t, res)
 }
 

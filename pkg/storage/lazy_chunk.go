@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/log/level"
 
 	"github.com/grafana/loki/pkg/chunkenc"
@@ -13,13 +12,15 @@ import (
 	"github.com/grafana/loki/pkg/logproto"
 	"github.com/grafana/loki/pkg/logql/log"
 	"github.com/grafana/loki/pkg/storage/chunk"
+	"github.com/grafana/loki/pkg/storage/chunk/fetcher"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 // LazyChunk loads the chunk when it is accessed.
 type LazyChunk struct {
 	Chunk   chunk.Chunk
 	IsValid bool
-	Fetcher *chunk.Fetcher
+	Fetcher *fetcher.Fetcher
 
 	// cache of overlapping block.
 	// We use the offset of the block as key since it's unique per chunk.
@@ -37,7 +38,6 @@ func (c *LazyChunk) Iterator(
 	pipeline log.StreamPipeline,
 	nextChunk *LazyChunk,
 ) (iter.EntryIterator, error) {
-
 	// If the chunk is not already loaded, then error out.
 	if c.Chunk.Data == nil {
 		return nil, errors.New("chunk is not loaded")
@@ -85,7 +85,7 @@ func (c *LazyChunk) Iterator(
 
 	if direction == logproto.FORWARD {
 		return iter.NewTimeRangedIterator(
-			iter.NewNonOverlappingIterator(its, ""),
+			iter.NewNonOverlappingIterator(its),
 			from,
 			through,
 		), nil
@@ -106,7 +106,7 @@ func (c *LazyChunk) Iterator(
 		its[i], its[j] = its[j], its[i]
 	}
 
-	return iter.NewNonOverlappingIterator(its, ""), nil
+	return iter.NewNonOverlappingIterator(its), nil
 }
 
 // SampleIterator returns an sample iterator.
@@ -118,7 +118,6 @@ func (c *LazyChunk) SampleIterator(
 	extractor log.StreamSampleExtractor,
 	nextChunk *LazyChunk,
 ) (iter.SampleIterator, error) {
-
 	// If the chunk is not already loaded, then error out.
 	if c.Chunk.Data == nil {
 		return nil, errors.New("chunk is not loaded")
@@ -166,7 +165,7 @@ func (c *LazyChunk) SampleIterator(
 
 	// build the final iterator bound to the requested time range.
 	return iter.NewTimeRangedSampleIterator(
-		iter.NewNonOverlappingSampleIterator(its, ""),
+		iter.NewNonOverlappingSampleIterator(its),
 		from.UnixNano(),
 		through.UnixNano(),
 	), nil

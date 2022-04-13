@@ -7,18 +7,16 @@ import (
 	"strings"
 	"time"
 
-	cortexcache "github.com/cortexproject/cortex/pkg/chunk/cache"
-	"github.com/cortexproject/cortex/pkg/ruler/rulestore/local"
 	"github.com/grafana/dskit/flagext"
 	"github.com/pkg/errors"
 
 	"github.com/grafana/loki/pkg/loki/common"
 	"github.com/grafana/loki/pkg/storage/chunk/cache"
+	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/util"
 	"github.com/grafana/loki/pkg/util/cfg"
 
-	loki_storage "github.com/grafana/loki/pkg/storage"
-	chunk_storage "github.com/grafana/loki/pkg/storage/chunk/storage"
+	"github.com/grafana/loki/pkg/ruler/rulestore/local"
 	loki_net "github.com/grafana/loki/pkg/util/net"
 )
 
@@ -31,6 +29,7 @@ type ConfigWrapper struct {
 	PrintVersion    bool
 	VerifyConfig    bool
 	PrintConfig     bool
+	ListTargets     bool
 	LogConfig       bool
 	ConfigFile      string
 	ConfigExpandEnv bool
@@ -40,6 +39,7 @@ func (c *ConfigWrapper) RegisterFlags(f *flag.FlagSet) {
 	f.BoolVar(&c.PrintVersion, "version", false, "Print this builds version information")
 	f.BoolVar(&c.VerifyConfig, "verify-config", false, "Verify config file and exits")
 	f.BoolVar(&c.PrintConfig, "print-config-stderr", false, "Dump the entire Loki config object to stderr")
+	f.BoolVar(&c.ListTargets, "list-targets", false, "List available targets")
 	f.BoolVar(&c.LogConfig, "log-config-reverse-order", false, "Dump the entire Loki config object at Info log "+
 		"level with the order reversed, reversing the order makes viewing the entries easier in Grafana.")
 	f.StringVar(&c.ConfigFile, "config.file", "", "yaml file to load")
@@ -83,6 +83,8 @@ func (c *ConfigWrapper) ApplyDynamicConfig() cfg.Source {
 
 		applyPathPrefixDefaults(r, &defaults)
 
+		applyInstanceConfigs(r, &defaults)
+
 		applyDynamicRingConfigs(r, &defaults)
 
 		appendLoopbackInterface(r, &defaults)
@@ -95,15 +97,45 @@ func (c *ConfigWrapper) ApplyDynamicConfig() cfg.Source {
 			return err
 		}
 
-		if len(r.SchemaConfig.Configs) > 0 && loki_storage.UsingBoltdbShipper(r.SchemaConfig.Configs) {
+		if len(r.SchemaConfig.Configs) > 0 && config.UsingBoltdbShipper(r.SchemaConfig.Configs) {
 			betterBoltdbShipperDefaults(r, &defaults)
 		}
 
 		applyFIFOCacheConfig(r)
 		applyIngesterFinalSleep(r)
+		applyIngesterReplicationFactor(r)
 		applyChunkRetain(r, &defaults)
 
 		return nil
+	}
+}
+
+// applyInstanceConfigs apply to Loki components instance-related configurations under the common
+// config section.
+//
+// The list of components making usage of these instance-related configurations are: compactor's ring,
+// ruler's ring, distributor's ring, ingester's ring, query scheduler's ring, and the query frontend.
+//
+// The list of implement common configurations are:
+// - "instance-addr", the address advertised to be used by other components.
+// - "instance-interface-names", a list of net interfaces used when looking for addresses.
+func applyInstanceConfigs(r, defaults *ConfigWrapper) {
+	if !reflect.DeepEqual(r.Common.InstanceAddr, defaults.Common.InstanceAddr) {
+		r.Ingester.LifecyclerConfig.Addr = r.Common.InstanceAddr
+		r.CompactorConfig.CompactorRing.InstanceAddr = r.Common.InstanceAddr
+		r.Distributor.DistributorRing.InstanceAddr = r.Common.InstanceAddr
+		r.Ruler.Ring.InstanceAddr = r.Common.InstanceAddr
+		r.QueryScheduler.SchedulerRing.InstanceAddr = r.Common.InstanceAddr
+		r.Frontend.FrontendV2.Addr = r.Common.InstanceAddr
+	}
+
+	if !reflect.DeepEqual(r.Common.InstanceInterfaceNames, defaults.Common.InstanceInterfaceNames) {
+		r.Ingester.LifecyclerConfig.InfNames = r.Common.InstanceInterfaceNames
+		r.CompactorConfig.CompactorRing.InstanceInterfaceNames = r.Common.InstanceInterfaceNames
+		r.Distributor.DistributorRing.InstanceInterfaceNames = r.Common.InstanceInterfaceNames
+		r.Ruler.Ring.InstanceInterfaceNames = r.Common.InstanceInterfaceNames
+		r.QueryScheduler.SchedulerRing.InstanceInterfaceNames = r.Common.InstanceInterfaceNames
+		r.Frontend.FrontendV2.InfNames = r.Common.InstanceInterfaceNames
 	}
 }
 
@@ -146,9 +178,9 @@ func applyDynamicRingConfigs(r, defaults *ConfigWrapper) {
 //any deviations from defaults. When mergeWithExisting is true, the ring config is overlaid on top of any specified
 //derivations, with the derivations taking precedence.
 func applyConfigToRings(r, defaults *ConfigWrapper, rc util.RingConfig, mergeWithExisting bool) {
-	//Ingester - mergeWithExisting is false when applying the ingester config, and we only want to
-	//change ingester ring values when applying the common config, so there's no need for the DeepEqual
-	//check here.
+	// Ingester - mergeWithExisting is false when applying the ingester config, and we only want to
+	// change ingester ring values when applying the common config, so there's no need for the DeepEqual
+	// check here.
 	if mergeWithExisting {
 		r.Ingester.LifecyclerConfig.RingConfig.KVStore = rc.KVStore
 		r.Ingester.LifecyclerConfig.HeartbeatPeriod = rc.HeartbeatPeriod
@@ -331,7 +363,7 @@ var ErrTooManyStorageConfigs = errors.New("too many storage configs provided in 
 func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 	var applyConfig func(*ConfigWrapper)
 
-	//only one config is allowed
+	// only one config is allowed
 	configsFound := 0
 
 	if !reflect.DeepEqual(cfg.Common.Storage.Azure, defaults.StorageConfig.AzureStorageConfig) {
@@ -339,9 +371,10 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 
 		applyConfig = func(r *ConfigWrapper) {
 			r.Ruler.StoreConfig.Type = "azure"
-			r.Ruler.StoreConfig.Azure = r.Common.Storage.Azure.ToCortexAzureConfig()
+			r.Ruler.StoreConfig.Azure = r.Common.Storage.Azure
 			r.StorageConfig.AzureStorageConfig = r.Common.Storage.Azure
-			r.CompactorConfig.SharedStoreType = chunk_storage.StorageTypeAzure
+			r.StorageConfig.Hedging = r.Common.Storage.Hedging
+			r.CompactorConfig.SharedStoreType = config.StorageTypeAzure
 		}
 	}
 
@@ -356,7 +389,7 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 			r.Ruler.StoreConfig.Type = "local"
 			r.Ruler.StoreConfig.Local = local.Config{Directory: r.Common.Storage.FSConfig.RulesDirectory}
 			r.StorageConfig.FSConfig.Directory = r.Common.Storage.FSConfig.ChunksDirectory
-			r.CompactorConfig.SharedStoreType = chunk_storage.StorageTypeFileSystem
+			r.CompactorConfig.SharedStoreType = config.StorageTypeFileSystem
 		}
 	}
 
@@ -365,9 +398,10 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 
 		applyConfig = func(r *ConfigWrapper) {
 			r.Ruler.StoreConfig.Type = "gcs"
-			r.Ruler.StoreConfig.GCS = r.Common.Storage.GCS.ToCortexGCSConfig()
+			r.Ruler.StoreConfig.GCS = r.Common.Storage.GCS
 			r.StorageConfig.GCSConfig = r.Common.Storage.GCS
-			r.CompactorConfig.SharedStoreType = chunk_storage.StorageTypeGCS
+			r.CompactorConfig.SharedStoreType = config.StorageTypeGCS
+			r.StorageConfig.Hedging = r.Common.Storage.Hedging
 		}
 	}
 
@@ -376,9 +410,10 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 
 		applyConfig = func(r *ConfigWrapper) {
 			r.Ruler.StoreConfig.Type = "s3"
-			r.Ruler.StoreConfig.S3 = r.Common.Storage.S3.ToCortexS3Config()
+			r.Ruler.StoreConfig.S3 = r.Common.Storage.S3
 			r.StorageConfig.AWSStorageConfig.S3Config = r.Common.Storage.S3
-			r.CompactorConfig.SharedStoreType = chunk_storage.StorageTypeS3
+			r.CompactorConfig.SharedStoreType = config.StorageTypeS3
+			r.StorageConfig.Hedging = r.Common.Storage.Hedging
 		}
 	}
 
@@ -387,9 +422,10 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 
 		applyConfig = func(r *ConfigWrapper) {
 			r.Ruler.StoreConfig.Type = "swift"
-			r.Ruler.StoreConfig.Swift = r.Common.Storage.Swift.ToCortexSwiftConfig()
+			r.Ruler.StoreConfig.Swift = r.Common.Storage.Swift
 			r.StorageConfig.Swift = r.Common.Storage.Swift
-			r.CompactorConfig.SharedStoreType = chunk_storage.StorageTypeSwift
+			r.CompactorConfig.SharedStoreType = config.StorageTypeSwift
+			r.StorageConfig.Hedging = r.Common.Storage.Hedging
 		}
 	}
 
@@ -405,7 +441,7 @@ func applyStorageConfig(cfg, defaults *ConfigWrapper) error {
 }
 
 func betterBoltdbShipperDefaults(cfg, defaults *ConfigWrapper) {
-	currentSchemaIdx := loki_storage.ActivePeriodConfig(cfg.SchemaConfig.Configs)
+	currentSchemaIdx := config.ActivePeriodConfig(cfg.SchemaConfig.Configs)
 	currentSchema := cfg.SchemaConfig.Configs[currentSchemaIdx]
 
 	if cfg.StorageConfig.BoltDBShipperConfig.SharedStoreType == defaults.StorageConfig.BoltDBShipperConfig.SharedStoreType {
@@ -441,33 +477,21 @@ func applyFIFOCacheConfig(r *ConfigWrapper) {
 	}
 
 	resultsCacheConfig := r.QueryRange.ResultsCacheConfig.CacheConfig
-	if !isRedisSet(resultsCacheConfig) && !isMemcacheSet(resultsCacheConfig) {
+	if !cache.IsRedisSet(resultsCacheConfig) && !cache.IsMemcacheSet(resultsCacheConfig) {
 		r.QueryRange.ResultsCacheConfig.CacheConfig.EnableFifoCache = true
 		// The query results fifocache is still in Cortex so we couldn't change the flag defaults
 		// so instead we will override them here.
 		r.QueryRange.ResultsCacheConfig.CacheConfig.Fifocache.MaxSizeBytes = "1GB"
-		r.QueryRange.ResultsCacheConfig.CacheConfig.Fifocache.Validity = 1 * time.Hour
+		r.QueryRange.ResultsCacheConfig.CacheConfig.Fifocache.TTL = 1 * time.Hour
 	}
-}
-
-// isRedisSet is a duplicate of cache.IsRedisSet.
-//
-// We had to duplicate this implementation because we have code relying on
-// loki/pkg/storage/chunk/cache and cortex/pkg/chunk/cache at the same time.
-func isRedisSet(cfg cortexcache.Config) bool {
-	return cfg.Redis.Endpoint != ""
-}
-
-// isMemcacheSet is a duplicate of cache.IsMemcacheSet.
-//
-// We had to duplicate this implementation because we have code relying on
-// loki/pkg/storage/chunk/cache and cortex/pkg/chunk/cache at the same time.
-func isMemcacheSet(cfg cortexcache.Config) bool {
-	return cfg.MemcacheClient.Addresses != "" || cfg.MemcacheClient.Host != ""
 }
 
 func applyIngesterFinalSleep(cfg *ConfigWrapper) {
 	cfg.Ingester.LifecyclerConfig.FinalSleep = 0 * time.Second
+}
+
+func applyIngesterReplicationFactor(cfg *ConfigWrapper) {
+	cfg.Ingester.LifecyclerConfig.RingConfig.ReplicationFactor = cfg.Common.ReplicationFactor
 }
 
 // applyChunkRetain is used to set chunk retain based on having an index query cache configured

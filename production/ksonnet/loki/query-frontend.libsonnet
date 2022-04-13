@@ -21,10 +21,7 @@ local k = import 'ksonnet-util/kausal.libsonnet';
     // sharded queries may need to do a nonzero amount of aggregation on the frontend.
     if $._config.queryFrontend.sharded_queries_enabled then
       k.util.resourcesRequests('2', '2Gi') +
-      k.util.resourcesLimits(null, '6Gi') +
-      container.withEnvMap({
-        JAEGER_REPORTER_MAX_QUEUE_SIZE: '5000',
-      })
+      k.util.resourcesLimits(null, '6Gi')
     else k.util.resourcesRequests('2', '600Mi') +
          k.util.resourcesLimits(null, '1200Mi'),
 
@@ -38,7 +35,9 @@ local k = import 'ksonnet-util/kausal.libsonnet';
       $._config.overrides_configmap_mount_name,
       $._config.overrides_configmap_mount_path,
     ) +
-    k.util.antiAffinity,
+    k.util.antiAffinity +
+    deployment.mixin.spec.strategy.rollingUpdate.withMaxSurge(5) +
+    deployment.mixin.spec.strategy.rollingUpdate.withMaxUnavailable(1),
 
   local service = k.core.v1.service,
 

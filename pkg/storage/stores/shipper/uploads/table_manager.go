@@ -11,22 +11,22 @@ import (
 	"sync"
 	"time"
 
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-	"github.com/cortexproject/cortex/pkg/util/spanlogger"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/grafana/loki/pkg/storage/chunk"
-	"github.com/grafana/loki/pkg/storage/chunk/local"
-	chunk_util "github.com/grafana/loki/pkg/storage/chunk/util"
+	"github.com/grafana/loki/pkg/storage/chunk/client/local"
+	chunk_util "github.com/grafana/loki/pkg/storage/chunk/client/util"
+	"github.com/grafana/loki/pkg/storage/stores/series/index"
 	"github.com/grafana/loki/pkg/storage/stores/shipper/util"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 type Config struct {
-	Uploader       string
-	IndexDir       string
-	UploadInterval time.Duration
-	DBRetainPeriod time.Duration
+	Uploader             string
+	IndexDir             string
+	UploadInterval       time.Duration
+	DBRetainPeriod       time.Duration
+	MakePerTenantBuckets bool
 }
 
 type TableManager struct {
@@ -92,7 +92,7 @@ func (tm *TableManager) Stop() {
 	tm.uploadTables(context.Background(), true)
 }
 
-func (tm *TableManager) QueryPages(ctx context.Context, queries []chunk.IndexQuery, callback chunk_util.Callback) error {
+func (tm *TableManager) QueryPages(ctx context.Context, queries []index.Query, callback index.QueryPagesCallback) error {
 	queriesByTable := util.QueriesByTable(queries)
 	for tableName, queries := range queriesByTable {
 		err := tm.query(ctx, tableName, queries, callback)
@@ -104,14 +104,8 @@ func (tm *TableManager) QueryPages(ctx context.Context, queries []chunk.IndexQue
 	return nil
 }
 
-func (tm *TableManager) query(ctx context.Context, tableName string, queries []chunk.IndexQuery, callback chunk_util.Callback) error {
-	tm.tablesMtx.RLock()
-	defer tm.tablesMtx.RUnlock()
-
-	log, ctx := spanlogger.New(ctx, "Shipper.Uploads.Query")
-	defer log.Span.Finish()
-
-	table, ok := tm.tables[tableName]
+func (tm *TableManager) query(ctx context.Context, tableName string, queries []index.Query, callback index.QueryPagesCallback) error {
+	table, ok := tm.getTable(tableName)
 	if !ok {
 		return nil
 	}
@@ -119,7 +113,14 @@ func (tm *TableManager) query(ctx context.Context, tableName string, queries []c
 	return util.DoParallelQueries(ctx, table, queries, callback)
 }
 
-func (tm *TableManager) BatchWrite(ctx context.Context, batch chunk.WriteBatch) error {
+func (tm *TableManager) getTable(tableName string) (*Table, bool) {
+	tm.tablesMtx.RLock()
+	defer tm.tablesMtx.RUnlock()
+	table, ok := tm.tables[tableName]
+	return table, ok
+}
+
+func (tm *TableManager) BatchWrite(ctx context.Context, batch index.WriteBatch) error {
 	boltWriteBatch, ok := batch.(*local.BoltWriteBatch)
 	if !ok {
 		return errors.New("invalid write batch")
@@ -141,9 +142,7 @@ func (tm *TableManager) BatchWrite(ctx context.Context, batch chunk.WriteBatch) 
 }
 
 func (tm *TableManager) getOrCreateTable(tableName string) (*Table, error) {
-	tm.tablesMtx.RLock()
-	table, ok := tm.tables[tableName]
-	tm.tablesMtx.RUnlock()
+	table, ok := tm.getTable(tableName)
 
 	if !ok {
 		tm.tablesMtx.Lock()
@@ -152,7 +151,8 @@ func (tm *TableManager) getOrCreateTable(tableName string) (*Table, error) {
 		table, ok = tm.tables[tableName]
 		if !ok {
 			var err error
-			table, err = NewTable(filepath.Join(tm.cfg.IndexDir, tableName), tm.cfg.Uploader, tm.storageClient, tm.boltIndexClient)
+			table, err = NewTable(filepath.Join(tm.cfg.IndexDir, tableName), tm.cfg.Uploader, tm.storageClient,
+				tm.boltIndexClient, tm.cfg.MakePerTenantBuckets)
 			if err != nil {
 				return nil, err
 			}
@@ -239,7 +239,8 @@ func (tm *TableManager) loadTables() (map[string]*Table, error) {
 		}
 
 		level.Info(util_log.Logger).Log("msg", fmt.Sprintf("loading table %s", fileInfo.Name()))
-		table, err := LoadTable(filepath.Join(tm.cfg.IndexDir, fileInfo.Name()), tm.cfg.Uploader, tm.storageClient, tm.boltIndexClient, tm.metrics)
+		table, err := LoadTable(filepath.Join(tm.cfg.IndexDir, fileInfo.Name()), tm.cfg.Uploader, tm.storageClient,
+			tm.boltIndexClient, tm.cfg.MakePerTenantBuckets, tm.metrics)
 		if err != nil {
 			return nil, err
 		}

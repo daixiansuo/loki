@@ -83,7 +83,8 @@ func NewReader(writer io.Writer,
 	labelVal string,
 	streamName string,
 	streamValue string,
-	interval time.Duration) *Reader {
+	interval time.Duration,
+) *Reader {
 	h := http.Header{}
 	if user != "" {
 		h = http.Header{"Authorization": {"Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))}}
@@ -344,12 +345,19 @@ func (r *Reader) run() {
 
 		// Set a read timeout of 10x the interval we expect to see messages
 		// Ignore the error as it will get caught when we call ReadJSON
-		_ = r.conn.SetReadDeadline(time.Now().Add(10 * r.interval))
+		timeoutInterval := 10 * r.interval
+		_ = r.conn.SetReadDeadline(time.Now().Add(timeoutInterval))
 		// I assume this is a blocking call that either reads from the websocket connection
 		// or times out based on the above SetReadDeadline call.
 		err := unmarshal.ReadTailResponseJSON(tailResponse, r.conn)
 		if err != nil {
-			fmt.Fprintf(r.w, "error reading websocket, will retry in 10 seconds: %s\n", err)
+			reason := "error reading websocket"
+			if e, ok := err.(net.Error); ok && e.Timeout() {
+				reason = fmt.Sprintf("timeout tailing new logs (timeout period: %.2fs)", timeoutInterval.Seconds())
+			}
+
+			fmt.Fprintf(r.w, "%s, will retry in 10 seconds: %s\n", reason, err)
+
 			// Even though we sleep between connection retries, we found it's possible to DOS Loki if the connection
 			// succeeds but some other error is returned, so also sleep here before retrying.
 			<-time.After(10 * time.Second)
@@ -434,11 +442,11 @@ func (r *Reader) closeAndReconnect() {
 func parseResponse(entry *loghttp.Entry) (*time.Time, error) {
 	sp := strings.Split(entry.Line, " ")
 	if len(sp) != 2 {
-		return nil, errors.Errorf("received invalid entry: %s\n", entry.Line)
+		return nil, errors.Errorf("received invalid entry: %s", entry.Line)
 	}
 	ts, err := strconv.ParseInt(sp[0], 10, 64)
 	if err != nil {
-		return nil, errors.Errorf("failed to parse timestamp: %s\n", sp[0])
+		return nil, errors.Errorf("failed to parse timestamp: %s", sp[0])
 	}
 	t := time.Unix(0, ts)
 	return &t, nil

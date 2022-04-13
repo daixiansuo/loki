@@ -2,7 +2,6 @@ package ingester
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"sort"
 	"sync"
@@ -10,17 +9,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/tenant"
 	gokitlog "github.com/go-kit/log"
 	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/stretchr/testify/require"
 	"github.com/weaveworks/common/user"
 	"golang.org/x/net/context"
+
+	"github.com/grafana/dskit/tenant"
 
 	"github.com/grafana/loki/pkg/chunkenc"
 	"github.com/grafana/loki/pkg/ingester/client"
@@ -29,8 +29,9 @@ import (
 	"github.com/grafana/loki/pkg/logql"
 	"github.com/grafana/loki/pkg/logql/log"
 	"github.com/grafana/loki/pkg/runtime"
-	"github.com/grafana/loki/pkg/storage"
 	"github.com/grafana/loki/pkg/storage/chunk"
+	"github.com/grafana/loki/pkg/storage/chunk/fetcher"
+	"github.com/grafana/loki/pkg/storage/config"
 	"github.com/grafana/loki/pkg/validation"
 )
 
@@ -131,9 +132,7 @@ func buildChunkDecs(t testing.TB) []*chunkDesc {
 func TestWALFullFlush(t *testing.T) {
 	// technically replaced with a fake wal, but the ingester New() function creates a regular wal first,
 	// so we enable creation/cleanup even though it remains unused.
-	walDir, err := ioutil.TempDir(os.TempDir(), "loki-wal")
-	require.Nil(t, err)
-	defer os.RemoveAll(walDir)
+	walDir := t.TempDir()
 
 	store, ing := newTestStore(t, defaultIngesterTestConfigWithWAL(t, walDir), fullWAL{})
 	testData := pushTestSamples(t, ing)
@@ -182,8 +181,8 @@ func TestFlushingCollidingLabels(t *testing.T) {
 	// make sure all chunks have different fingerprint, even colliding ones.
 	chunkFingerprints := map[model.Fingerprint]bool{}
 	for _, c := range store.getChunksForUser(userID) {
-		require.False(t, chunkFingerprints[c.Fingerprint])
-		chunkFingerprints[c.Fingerprint] = true
+		require.False(t, chunkFingerprints[c.FingerprintModel()])
+		chunkFingerprints[c.FingerprintModel()] = true
 	}
 }
 
@@ -334,17 +333,17 @@ func (s *testStore) SelectSamples(ctx context.Context, req logql.SelectSamplePar
 	return nil, nil
 }
 
-func (s *testStore) GetChunkRefs(ctx context.Context, userID string, from, through model.Time, matchers ...*labels.Matcher) ([][]chunk.Chunk, []*chunk.Fetcher, error) {
+func (s *testStore) GetChunkRefs(ctx context.Context, userID string, from, through model.Time, matchers ...*labels.Matcher) ([][]chunk.Chunk, []*fetcher.Fetcher, error) {
 	return nil, nil, nil
 }
 
-func (s *testStore) GetSchemaConfigs() []chunk.PeriodConfig {
+func (s *testStore) GetSchemaConfigs() []config.PeriodConfig {
 	return nil
 }
 
 func (s *testStore) Stop() {}
 
-func (s *testStore) SetChunkFilterer(_ storage.RequestChunkFilterer) {}
+func (s *testStore) SetChunkFilterer(_ chunk.RequestChunkFilterer) {}
 
 func pushTestSamples(t *testing.T, ing logproto.PusherServer) map[string][]logproto.Stream {
 	userIDs := []string{"1", "2", "3"}

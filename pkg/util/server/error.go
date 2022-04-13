@@ -5,17 +5,15 @@ import (
 	"errors"
 	"net/http"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
-	"github.com/grafana/loki/pkg/util"
-
 	"github.com/prometheus/prometheus/promql"
 	"github.com/weaveworks/common/httpgrpc"
 	"github.com/weaveworks/common/user"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/grafana/loki/pkg/logqlmodel"
-	"github.com/grafana/loki/pkg/storage/chunk"
+	storage_errors "github.com/grafana/loki/pkg/storage/errors"
+	"github.com/grafana/loki/pkg/util"
 )
 
 // StatusClientClosedRequest is the status code for when a client request cancellation of an http request
@@ -29,12 +27,12 @@ const (
 // WriteError write a go error with the correct status code.
 func WriteError(err error, w http.ResponseWriter) {
 	var (
-		queryErr chunk.QueryError
+		queryErr storage_errors.QueryError
 		promErr  promql.ErrStorage
 	)
 
 	me, ok := err.(util.MultiError)
-	if ok && me.IsCancel() {
+	if ok && me.Is(context.Canceled) {
 		http.Error(w, ErrClientCanceled, StatusClientClosedRequest)
 		return
 	}
@@ -46,7 +44,6 @@ func WriteError(err error, w http.ResponseWriter) {
 	s, isRPC := status.FromError(err)
 	switch {
 	case errors.Is(err, context.Canceled) ||
-		(isRPC && s.Code() == codes.Canceled) ||
 		(errors.As(err, &promErr) && errors.Is(promErr.Err, context.Canceled)):
 		http.Error(w, ErrClientCanceled, StatusClientClosedRequest)
 	case errors.Is(err, context.DeadlineExceeded) ||

@@ -9,16 +9,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/tenant"
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/imdario/mergo"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/relabel"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/relabel"
 	promql_parser "github.com/prometheus/prometheus/promql/parser"
 	"github.com/weaveworks/common/server"
+
+	"github.com/grafana/dskit/tenant"
 
 	"github.com/grafana/loki/clients/pkg/promtail/api"
 	"github.com/grafana/loki/clients/pkg/promtail/scrapeconfig"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/grafana/loki/pkg/loghttp/push"
 	"github.com/grafana/loki/pkg/logproto"
+	util_log "github.com/grafana/loki/pkg/util/log"
 )
 
 type PushTarget struct {
@@ -41,7 +43,8 @@ func NewPushTarget(logger log.Logger,
 	handler api.EntryHandler,
 	relabel []*relabel.Config,
 	jobName string,
-	config *scrapeconfig.PushTargetConfig) (*PushTarget, error) {
+	config *scrapeconfig.PushTargetConfig,
+) (*PushTarget, error) {
 
 	pt := &PushTarget{
 		logger:        logger,
@@ -86,7 +89,9 @@ func (t *PushTarget) run() error {
 	// We don't want the /debug and /metrics endpoints running
 	t.config.Server.RegisterInstrumentation = false
 
-	util_log.InitLogger(&t.config.Server)
+	// The logger registers a metric which will cause a duplicate registry panic unless we provide an empty registry
+	// The metric created is for counting log lines and isn't likely to be missed.
+	util_log.InitLogger(&t.config.Server, prometheus.NewRegistry())
 
 	srv, err := server.New(t.config.Server)
 	if err != nil {

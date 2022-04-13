@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cortexproject/cortex/pkg/util"
 	"github.com/go-kit/log"
 	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/flagext"
@@ -24,6 +23,7 @@ import (
 	"github.com/grafana/loki/clients/pkg/promtail/api"
 
 	"github.com/grafana/loki/pkg/logproto"
+	"github.com/grafana/loki/pkg/util"
 	lokiflag "github.com/grafana/loki/pkg/util/flagext"
 )
 
@@ -266,7 +266,8 @@ func TestClient_Handle(t *testing.T) {
 				TenantID:       testData.clientTenantID,
 			}
 
-			c, err := New(reg, cfg, log.NewNopLogger())
+			m := NewMetrics(reg, nil)
+			c, err := New(m, cfg, nil, log.NewNopLogger())
 			require.NoError(t, err)
 
 			// Send all the input log entries
@@ -397,8 +398,8 @@ func TestClient_StopNow(t *testing.T) {
 				Timeout:        1 * time.Second,
 				TenantID:       c.clientTenantID,
 			}
-
-			cl, err := New(reg, cfg, log.NewNopLogger())
+			m := NewMetrics(reg, nil)
+			cl, err := New(m, cfg, nil, log.NewNopLogger())
 			require.NoError(t, err)
 
 			// Send all the input log entries
@@ -472,9 +473,9 @@ func Test_Tripperware(t *testing.T) {
 	url, err := url.Parse("http://foo.com")
 	require.NoError(t, err)
 	var called bool
-	c, err := NewWithTripperware(nil, Config{
+	c, err := NewWithTripperware(metrics, Config{
 		URL: flagext.URLValue{URL: url},
-	}, log.NewNopLogger(), func(rt http.RoundTripper) http.RoundTripper {
+	}, nil, log.NewNopLogger(), func(rt http.RoundTripper) http.RoundTripper {
 		return RoundTripperFunc(func(r *http.Request) (*http.Response, error) {
 			require.Equal(t, r.URL.String(), "http://foo.com")
 			called = true
