@@ -421,6 +421,7 @@ func getCustomPodLogPathFromDockerInspect(inspect *types.ContainerJSON) string {
 		javaMemory        string = "/root/logs/*/memory.log"
 		application       string = "/root/logs/*/application.log"
 		appLog            string = "/root/logs/*/app.log"
+		stackDubboLog     string = "/root/logs/*/DubboStack.*.log"
 	)
 
 	var pathString string = "{" + inspect.LogPath + ","
@@ -434,7 +435,8 @@ func getCustomPodLogPathFromDockerInspect(inspect *types.ContainerJSON) string {
 			path.Join(graphDiff, accessDubboLog) + "," +
 			path.Join(graphDiff, mongoLog) + "," +
 			path.Join(graphDiff, javaMemory) + "," +
-			path.Join(graphDiff, application) + ","
+			path.Join(graphDiff, application) + "," +
+			path.Join(graphDiff, stackDubboLog) + ","
 	}
 
 	pathString += "}"

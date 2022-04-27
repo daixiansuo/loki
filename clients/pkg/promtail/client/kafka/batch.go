@@ -21,12 +21,12 @@ const (
 
 var (
 	DefaultHostName string
-	once sync.Once
+	once            sync.Once
 )
 
-func init(){
+func init() {
 	once.Do(func() {
-		DefaultHostName,_ = os.Hostname()
+		DefaultHostName, _ = os.Hostname()
 	})
 }
 
@@ -39,6 +39,7 @@ const (
 	TopicKindAccessRest  TopicKind = "access"
 	TopicKindGc          TopicKind = "gc.log"
 	TopicKindJavaMemory  TopicKind = "memory.log"
+	TopicKindStackDubbo  TopicKind = "DubboStack"
 
 	// common log
 	TopicKindAppJson TopicKind = "appJson/jsonApp" // buf
@@ -47,7 +48,6 @@ const (
 
 	// system log
 	TopicKindSysDmesg TopicKind = "/var/log/dmesg"
-
 
 	TopicKindFake TopicKind = "fake.log"
 )
@@ -73,11 +73,13 @@ func getTopicKindFromEntry(e *api.Entry) (topKind TopicKind, isCommon bool) {
 		topKind, isCommon = TopicKindJavaMemory, true
 	} else if strings.Contains(filename, string(TopicKindAppJson)) { // appJson is not common
 		topKind, isCommon = TopicKindAppJson, false
-	}else if strings.Contains(filename, string(TopicKindFake)){
+	} else if strings.Contains(filename, string(TopicKindFake)) {
 		topKind, isCommon = TopicKindFake, true
 	} else if strings.Contains(filename, string(TopicKindSysDmesg)) {
 		topKind, isCommon = TopicKindSysDmesg, true
-	}else {
+	} else if strings.Contains(filename, string(TopicKindStackDubbo)) {
+		topKind, isCommon = TopicKindStackDubbo, true
+	} else {
 		topKind, isCommon = TopicKindUnknown, false
 	}
 	return
@@ -93,6 +95,8 @@ func (t TopicKind) topic() string {
 		return "promtail-accessmongo"
 	case TopicKindAccessDubbo:
 		return "promtail-accessdubbo"
+	case TopicKindStackDubbo:
+		return "promtail-dubbo-stack"
 	case TopicKindAccessRest:
 		return "promtail-accessrest"
 	case TopicKindGc:
@@ -209,7 +213,7 @@ func entryConvertToKafkaMessage(e api.Entry, topKind TopicKind, isCommon bool) *
 	req := e.Labels.Merge(map[model.LabelName]model.LabelValue{
 		"timestamp": model.LabelValue(e.Timestamp.String()),
 		"message":   model.LabelValue(e.Line),
-		"hostname": model.LabelValue(DefaultHostName),
+		"hostname":  model.LabelValue(DefaultHostName),
 	})
 
 	var value []byte
