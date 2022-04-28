@@ -23,9 +23,6 @@ const (
 	HostLabel             = "host"
 )
 
-const (
-	MAX_LOGLINE_SIZE = 1024 * 500
-)
 
 type metrics struct {
 	sendTotalKafkaMessages *prometheus.CounterVec // 已经成功发送的kafka条目
@@ -247,8 +244,8 @@ func (c *client) send(messages []*kafka.ProducerMessage) (int, error) {
 }
 
 // 过滤entry，如果entry line超过最大阀值，日志直接丢弃(只是在kafka端丢弃掉了)
-func validateEntry(e *api.Entry) bool {
-	if len(e.Line) > MAX_LOGLINE_SIZE {
+func (c *client)validateEntry(e *api.Entry) bool {
+	if len(e.Line) > c.cfg.ProducerMaxMessageSize {
 		return false
 	}
 	return true

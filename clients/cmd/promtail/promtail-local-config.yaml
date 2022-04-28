@@ -1,9 +1,12 @@
 clients:
   - file_system_config:
       path: /tmp/promtail/log
-#  - kafka:
-#      batch_size: 400000
-#      url: "172.35.88.54:9092"
+  - kafka:
+      batch_size: 2097152
+      url: "172.35.88.54:9092"
+      producer_max_message_size: 2097152
+      consumer_fetch_max_size: 2097152
+
 
 positions:
   filename: /tmp/positions.yaml

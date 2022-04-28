@@ -197,8 +197,8 @@ func (b *batch) age() time.Duration {
 // the encoded bytes and the number of encoded entries
 func (b *batch) encode() ([]*kafka.ProducerMessage, int, error) {
 	var (
-		requests         = []*kafka.ProducerMessage{}
-		entriesCount int = 0
+		requests     []*kafka.ProducerMessage = make([]*kafka.ProducerMessage, len(b.kafkaStreams))
+		entriesCount int                      = 0
 	)
 	for _, streams := range b.kafkaStreams {
 		requests = append(requests, streams.Messages...)

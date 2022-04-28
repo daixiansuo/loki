@@ -8,13 +8,14 @@ import (
 
 const (
 	BatchWait      = 1 * time.Second
-	BatchSize  int = 1024 * 1024
+	BatchSize  int = 10 * 1024 * 1024
 	MinBackoff     = 500 * time.Millisecond
 	MaxBackoff     = 1 * time.Minute
 	MaxRetries int = 10
 	Timeout        = 10 * time.Second
 
-	DefaultKafkaMaxMessageSize = 10048576
+	ProducerMaxMessageSize int = 10 * 1024 * 1024
+	ConsumerMaxMessageSize int = 10 * 1024 * 1024
 )
 
 type KafkaConfig struct {
@@ -25,16 +26,18 @@ type KafkaConfig struct {
 	GroupId   string `yaml:"groupId"`
 	Partition int    `yaml:"partition"`
 
-	// producer
-	//MaxMessageBytes int `json:"max_message_bytes"`
-
-
-	BatchWait     time.Duration      `yaml:"batch_wait"`
+	BatchWait time.Duration `yaml:"batch_wait"`
+	// The max number of entries  bytes can be cached in batch buffer
 	BatchSize     int                `yaml:"batch_size"`
 	BackoffConfig util.BackoffConfig `yaml:"backoff_config"`
 	// The labels to add to any time series or alerts when communicating with loki
 	ExternalLabels lokiflag.LabelSet `yaml:"external_labels,omitempty"`
 	Timeout        time.Duration     `yaml:"timeout"`
+
+	// The max number of message bytes that can be allowed to send to kafka server
+	ProducerMaxMessageSize int `yaml:"producer_max_message_size"`
+	// The max number of message bytes that consumer can fetch from broker
+	ConsumerFetchMaxSize int `yaml:"consumer_fetch_max_size"`
 }
 
 func DefaultKafkaConfig() KafkaConfig {
@@ -50,8 +53,9 @@ func DefaultKafkaConfig() KafkaConfig {
 			MinBackoff: MinBackoff,
 			MaxRetries: MaxRetries,
 		},
-		ExternalLabels: lokiflag.LabelSet{},
-		Timeout:        Timeout,
-		//MaxMessageBytes: DefaultKafkaMaxMessageSize,
+		ExternalLabels:         lokiflag.LabelSet{},
+		Timeout:                Timeout,
+		ProducerMaxMessageSize: ProducerMaxMessageSize,
+		ConsumerFetchMaxSize:   ConsumerMaxMessageSize,
 	}
 }
