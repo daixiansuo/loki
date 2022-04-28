@@ -144,12 +144,12 @@ func newBatch(entries ...api.Entry) *batch {
 
 // add an entry to the batch
 func (b *batch) add(entry api.Entry) {
-	b.bytes += entry.Size()
 	// unknown topicKind will be dropped
 	topicKind, isCommon := getTopicKindFromEntry(&entry)
 	if topicKind == TopicKindUnknown {
 		return
 	}
+	b.bytes += entry.Size()
 	// Append the entry to an already existing stream (if any)
 	labels := labelsMapToString(entry.Labels, ReservedLabelTenantID)
 	if streams, ok := b.kafkaStreams[labels]; ok {
