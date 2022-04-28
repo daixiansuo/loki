@@ -29,7 +29,7 @@ const (
 
 type metrics struct {
 	sendTotalKafkaMessages *prometheus.CounterVec // 已经成功发送的kafka条目
-	droppedEntry *prometheus.CounterVec //丢弃了多少entry，(非法的entry）
+	droppedEntry           *prometheus.CounterVec //丢弃了多少entry，(非法的entry）
 
 	countersWithHost []*prometheus.CounterVec
 }
@@ -43,11 +43,10 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 		Help:      "the number of messages that has been sent to kafka successfully",
 	}, []string{HostLabel})
 
-
 	m.droppedEntry = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "promtail",
-		Name: "droped_log_entry_total",
-		Help: "the number of log entris that dropped for line size is too long",
+		Name:      "droped_log_entry_total",
+		Help:      "the number of log entris that dropped for line size is too long",
 	}, []string{HostLabel})
 
 	m.countersWithHost = []*prometheus.CounterVec{
@@ -112,10 +111,13 @@ func NewKafkaClient(reg prometheus.Registerer, cfg KafkaConfig, logger log.Logge
 
 func newKafkaProducer(cfg *KafkaConfig) (kafka.SyncProducer, error) {
 	config := kafka.NewConfig()
-	config.Producer.MaxMessageBytes = 10048576
+	// 1MB = 1048576  10MB = 10485760
+	config.Producer.MaxMessageBytes = 10485760
 	config.Producer.Timeout = cfg.Timeout
 	config.Producer.Return.Successes = true
 	config.Producer.Partitioner = kafka.NewRandomPartitioner
+	config.Consumer.Fetch.Default = 10485760
+	config.Consumer.Fetch.Max = 10485760
 	return kafka.NewSyncProducer([]string{cfg.Url}, config)
 }
 
@@ -148,11 +150,7 @@ func (c *client) run() {
 			if !ok {
 				return
 			}
-			// check entry is validate, if line size > MAX_LOGLINE_SIZE, then dropit
-			if validateEntry(&e) == false {
-				c.metrics.droppedEntry.WithLabelValues(c.cfg.Url).Inc()
-				break
-			}
+
 			// entry is {{labels map}, lines, timestamp}
 			e, tenantId := c.processEntry(e)
 			batch, ok := batches[tenantId]
@@ -247,6 +245,7 @@ func (c *client) send(messages []*kafka.ProducerMessage) (int, error) {
 	return len(messages), errs
 
 }
+
 // 过滤entry，如果entry line超过最大阀值，日志直接丢弃(只是在kafka端丢弃掉了)
 func validateEntry(e *api.Entry) bool {
 	if len(e.Line) > MAX_LOGLINE_SIZE {
