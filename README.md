@@ -142,6 +142,6 @@ with CGO disabled:
 $ CGO_ENABLED=0 go build ./cmd/promtail
 ```
 
-## License
+## License 
 
 Grafana Loki is distributed under [AGPL-3.0-only](LICENSE). For Apache-2.0 exceptions, see [LICENSING.md](LICENSING.md).
