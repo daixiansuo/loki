@@ -15,7 +15,6 @@ const (
 	Timeout        = 10 * time.Second
 
 	ProducerMaxMessageSize int = 10 * 1024 * 1024
-	ConsumerMaxMessageSize int = 10 * 1024 * 1024
 )
 
 type KafkaConfig struct {
@@ -36,8 +35,6 @@ type KafkaConfig struct {
 
 	// The max number of message bytes that can be allowed to send to kafka server
 	ProducerMaxMessageSize int `yaml:"producer_max_message_size"`
-	// The max number of message bytes that consumer can fetch from broker
-	ConsumerFetchMaxSize int `yaml:"consumer_fetch_max_size"`
 }
 
 func DefaultKafkaConfig() KafkaConfig {
@@ -56,6 +53,5 @@ func DefaultKafkaConfig() KafkaConfig {
 		ExternalLabels:         lokiflag.LabelSet{},
 		Timeout:                Timeout,
 		ProducerMaxMessageSize: ProducerMaxMessageSize,
-		ConsumerFetchMaxSize:   ConsumerMaxMessageSize,
 	}
 }

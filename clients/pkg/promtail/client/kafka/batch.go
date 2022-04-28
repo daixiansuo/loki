@@ -125,6 +125,7 @@ type batch struct {
 	bytes        int
 	createdAt    time.Time
 	kafkaStreams map[string]*kafkaStream
+	numEntries   int
 }
 
 func newBatch(entries ...api.Entry) *batch {
@@ -133,6 +134,7 @@ func newBatch(entries ...api.Entry) *batch {
 		kafkaStreams: map[string]*kafkaStream{},
 		bytes:        0,
 		createdAt:    time.Now(),
+		numEntries:   0,
 	}
 
 	// Add entries to the batch
@@ -150,6 +152,7 @@ func (b *batch) add(entry api.Entry) {
 		return
 	}
 	b.bytes += entry.Size()
+	b.numEntries += 1
 	// Append the entry to an already existing stream (if any)
 	labels := labelsMapToString(entry.Labels, ReservedLabelTenantID)
 	if streams, ok := b.kafkaStreams[labels]; ok {
@@ -197,7 +200,7 @@ func (b *batch) age() time.Duration {
 // the encoded bytes and the number of encoded entries
 func (b *batch) encode() ([]*kafka.ProducerMessage, int, error) {
 	var (
-		requests     []*kafka.ProducerMessage = make([]*kafka.ProducerMessage, len(b.kafkaStreams))
+		requests     []*kafka.ProducerMessage = make([]*kafka.ProducerMessage, 0, b.numEntries)
 		entriesCount int                      = 0
 	)
 	for _, streams := range b.kafkaStreams {

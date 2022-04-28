@@ -23,7 +23,6 @@ const (
 	HostLabel             = "host"
 )
 
-
 type metrics struct {
 	sendTotalKafkaMessages *prometheus.CounterVec // 已经成功发送的kafka条目
 	droppedEntry           *prometheus.CounterVec //丢弃了多少entry，(非法的entry）
@@ -109,12 +108,10 @@ func NewKafkaClient(reg prometheus.Registerer, cfg KafkaConfig, logger log.Logge
 func newKafkaProducer(cfg *KafkaConfig) (kafka.SyncProducer, error) {
 	config := kafka.NewConfig()
 	// 1MB = 1048576  10MB = 10485760
-	config.Producer.MaxMessageBytes = 10485760
+	config.Producer.MaxMessageBytes = cfg.ProducerMaxMessageSize
 	config.Producer.Timeout = cfg.Timeout
 	config.Producer.Return.Successes = true
 	config.Producer.Partitioner = kafka.NewRandomPartitioner
-	config.Consumer.Fetch.Default = 10485760
-	config.Consumer.Fetch.Max = 10485760
 	return kafka.NewSyncProducer([]string{cfg.Url}, config)
 }
 
@@ -144,9 +141,16 @@ func (c *client) run() {
 	for {
 		select {
 		case e, ok := <-c.entries:
-			if !ok  || !c.validateEntry(&e){
+			if !ok {
 				return
 			}
+
+			// filter message size
+			if !c.validateEntry(&e) {
+				level.Error(c.logger).Log("msg", "message size exceeds limit", "max size: ", c.cfg.ProducerMaxMessageSize, "message size:", len(e.Line))
+				return
+			}
+
 			// entry is {{labels map}, lines, timestamp}
 			e, tenantId := c.processEntry(e)
 			batch, ok := batches[tenantId]
@@ -243,7 +247,7 @@ func (c *client) send(messages []*kafka.ProducerMessage) (int, error) {
 }
 
 // 过滤entry，如果entry line超过最大阀值，日志直接丢弃(只是在kafka端丢弃掉了)
-func (c *client)validateEntry(e *api.Entry) bool {
+func (c *client) validateEntry(e *api.Entry) bool {
 	if len(e.Line) > c.cfg.ProducerMaxMessageSize {
 		return false
 	}
