@@ -144,10 +144,9 @@ func (c *client) run() {
 	for {
 		select {
 		case e, ok := <-c.entries:
-			if !ok {
+			if !ok  || !c.validateEntry(&e){
 				return
 			}
-
 			// entry is {{labels map}, lines, timestamp}
 			e, tenantId := c.processEntry(e)
 			batch, ok := batches[tenantId]
