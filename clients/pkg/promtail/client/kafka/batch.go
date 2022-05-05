@@ -156,12 +156,12 @@ func (b *batch) add(entry api.Entry) {
 	// Append the entry to an already existing stream (if any)
 	labels := labelsMapToString(entry.Labels, ReservedLabelTenantID)
 	if streams, ok := b.kafkaStreams[labels]; ok {
-		streams.Messages = append(streams.Messages, entryConvertToKafkaMessage(entry, topicKind, isCommon))
+		streams.Messages = append(streams.Messages, entryToKafkaMessage(entry, topicKind, isCommon))
 		return
 	}
 
 	// Add kafka message as new message
-	b.kafkaStreams[labels] = &kafkaStream{Messages: []*kafka.ProducerMessage{entryConvertToKafkaMessage(entry, topicKind, isCommon)}}
+	b.kafkaStreams[labels] = &kafkaStream{Messages: []*kafka.ProducerMessage{entryToKafkaMessage(entry, topicKind, isCommon)}}
 }
 
 func labelsMapToString(ls model.LabelSet, without ...model.LabelName) string {
@@ -211,8 +211,7 @@ func (b *batch) encode() ([]*kafka.ProducerMessage, int, error) {
 }
 
 //go:inline
-func entryConvertToKafkaMessage(e api.Entry, topKind TopicKind, isCommon bool) *kafka.ProducerMessage {
-
+func entryToKafkaMessage(e api.Entry, topKind TopicKind, isCommon bool) *kafka.ProducerMessage {
 	req := e.Labels.Merge(map[model.LabelName]model.LabelValue{
 		"timestamp": model.LabelValue(e.Timestamp.String()),
 		"message":   model.LabelValue(e.Line),
@@ -248,4 +247,9 @@ func deploymentNameFromEntry(e *api.Entry) string {
 		return strings.Join(nSplit[:len(nSplit)-1], "-")
 	}
 	return controllerName
+}
+
+
+func (b *batch)getNumEntries()int{
+	return  b.numEntries
 }

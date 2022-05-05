@@ -3,176 +3,99 @@ package filesystem
 import (
 	"bufio"
 	"context"
-	"fmt"
-	util_log "github.com/cortexproject/cortex/pkg/util/log"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"os"
 	"path"
-	"strconv"
 	"testing"
 )
 
 const (
-	_TemplatePath string = "./tmp/%s"
+	mockPathStringTpl string = "./tmp/%s"
+	mockDateString string = "2022-5-5"
 )
 
-func TestFileHandlerHandle(t *testing.T) {
-	cases := map[string]struct {
-		HandlerId   string
-		manager     *Manager
-		entryString []string
+
+
+func Test_FileHandler_Handler(t *testing.T){
+	cases := []struct {
+		name string
+		handlerId string
+		entries []string
+		manager *Manager
+		expectedReceiveNum int
 	}{
-		"Nil Manager": {
-			HandlerId: "handler1",
-			manager:   nil,
-			entryString: []string{
-				"first line for handler1",
-				"second line for handler1",
-				"third line for handler1",
-				"fourth line for handler1",
-			},
+		{
+			name: "none manager, no line",
+			handlerId: "file1",
+			entries: []string{},
+			manager: nil,
+			expectedReceiveNum: 0,
 		},
-		"with Manager": {
-			HandlerId: "handler2",
-			manager:   newHandlerManager(),
-			entryString: []string{
-				"first line for handler2",
-				"second line for handler2",
-				"third line for handler2",
-				"fourth line for handler3",
-			},
+		{
+			name: "none manager, 4 lines",
+			handlerId: "file2",
+			entries: []string{"line1", "line2", "line3", "line4"},
+			manager: nil,
+			expectedReceiveNum: 4,
+		},
+		{
+			name: "with manager, no line",
+			handlerId: "file3",
+			entries: []string{},
+			manager: newHandlerManager(),
+			expectedReceiveNum: 0,
+		},
+		{
+			name: "with manager, 4 line",
+			handlerId: "file4",
+			entries: []string{"line1", "line2", "line3", "line4"},
+			manager: newHandlerManager(),
+			expectedReceiveNum: 4,
 		},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	for caseId, caseInfo := range cases {
-		t.Run(caseId, func(t *testing.T) {
-			handler, err := newFileHandler(ctx, util_log.Logger, caseId, _TemplatePath, caseInfo.HandlerId, caseInfo.manager)
-			assert.NoError(t, err)
-			for _, line := range caseInfo.entryString {
+	fakeMt := metadata{
+		namespace:      FakeNamespace,
+		controllerName: FakeController,
+		instance:       FakeInstance,
+		fileName:       FakeShortFileName,
+		originFilename: FakeFileName,
+		isKubernetes:   false,
+	}
+	fakeCfg := FileClientConfig{Path: "tmp"}
+	for _, tt := range cases{
+		t.Run(tt.name, func(t *testing.T) {
+			handler, err := newFileHandler(context.Background(), nil, &fakeCfg, tt.manager, &fakeMt )
+			require.NoError(t, err)
+			for _, line := range tt.entries{
 				handler.Receiver() <- line
 			}
 			handler.Stop()
-			fileName := path.Join(fmt.Sprintf(_TemplatePath, date2String()), handler.fileName)
+
+			fileName := path.Join(handler.directoryName, handler.writeFileName)
 			f, err := os.Open(fileName)
+			require.NoError(t, err)
 			scanner := bufio.NewScanner(f)
 			var count int = 0
 			for scanner.Scan() {
-				require.Equal(t, scanner.Text(), caseInfo.entryString[count])
+				require.Equal(t, scanner.Text(), tt.entries[count])
 				count++
 			}
-			require.Equal(t, count, 4)
+
+			require.Equal(t, tt.expectedReceiveNum, count)
 			require.NoError(t, f.Close())
-			require.NoError(t, err)
 			require.NoError(t, os.Remove(fileName))
-			require.NoError(t, os.RemoveAll("./tmp"))
+			require.NoError(t, os.RemoveAll(handler.directoryName))
 		})
 	}
 }
 
-func TestFileHandler_watchDog(t *testing.T) {
-	var (
-		EntryNumber int = 100
-		testCount   int = 10
-		doneCh          = make(chan struct{})
-		continueCh      = make(chan struct{})
 
-		basePath = "./tmp/" + FakeNamespace + "/" + FakeController + "/" + "%s" + "/" + FakeController
-	)
+func Test_FileHandler_Rotate(t *testing.T){
 
-	manager := newHandlerManager()
-	go func(t *testing.T) {
-		var err error
-		// continue input data
-		for count := 0; count < testCount; count++ {
-			_dateTpl := "2021-08-2" + strconv.Itoa(count)
-			title := "file" + strconv.Itoa(count)
-			handler := manager.Get(title)
-			handler, err = newFileHandler(context.Background(), util_log.Logger, title, basePath, title, manager, _dateTpl)
-			require.NoError(t, err)
-			require.NoError(t, manager.Register(title, handler))
-			for i := 0; i < EntryNumber; i++ {
-				handler.Receiver() <- fmt.Sprintf("line %d for %s", i, title)
-			}
-			handler.(*FileHandler).receiveSignal(_ChannelFileMissing)
-			doneCh <- struct{}{}
-			<-continueCh
-		}
-	}(t)
-
-	for count := 0; count < testCount; count++ {
-		<-doneCh
-		root := "tmp/fakeNamespace/fakeController/" + date2String("2021-08-2"+strconv.Itoa(count)) + "/fakeController"
-		for i := 0; i < 1; i++ {
-			title := "file" + strconv.Itoa(count)
-			fileName := path.Join(root, title)
-			fp, err := os.Open(fileName)
-			require.NoError(t, err)
-			scanner := bufio.NewScanner(fp)
-			var count int = 0
-			for scanner.Scan() {
-				count++
-			}
-			require.Equal(t, EntryNumber, count)
-			require.NoError(t, os.Remove(fileName))
-		}
-		//time.Sleep(1 * time.Second)
-		continueCh <- struct{}{}
-	}
-	require.NoError(t, os.RemoveAll("./tmp"))
-	manager.Stop()
-	require.NoError(t, manager.AwaitComplete())
 }
 
-func TestFileHandler_rotate(t *testing.T) {
-	var (
-		EntryNumber int = 100
-		testCount   int = 10
-		doneCh          = make(chan struct{})
-		continueCh      = make(chan struct{})
+func Test_FileHandler_FileWatcher(t *testing.T){
 
-		basePath = "./tmp/" + FakeNamespace + "/" + FakeController + "/" + "%s" + "/" + FakeController
-	)
-	manager := newHandlerManager()
-	go func(t *testing.T) {
-		var err error
-		// continue input data
-		for count := 0; count < testCount; count++ {
-			_dateTpl := "2021-08-2" + strconv.Itoa(count)
-			title := "file" + strconv.Itoa(count)
-			handler := manager.Get(title)
-			handler, err = newFileHandler(context.Background(), util_log.Logger, title, basePath, title, manager, _dateTpl)
-			require.NoError(t, err)
-			require.NoError(t, manager.Register(title, handler))
-			for i := 0; i < EntryNumber; i++ {
-				handler.Receiver() <- fmt.Sprintf("line %d for %s", i, title)
-			}
-			handler.(*FileHandler).receiveSignal(_ChannelRotateCh)
-			doneCh <- struct{}{}
-			<-continueCh
-		}
-	}(t)
-	for count := 0; count < testCount; count++ {
-		<-doneCh
-		root := "tmp/fakeNamespace/fakeController/" + date2String("2021-08-2"+strconv.Itoa(count)) + "/fakeController"
-		for i := 0; i < 1; i++ {
-			title := "file" + strconv.Itoa(count)
-			fileName := path.Join(root, title)
-			fp, err := os.Open(fileName)
-			require.NoError(t, err)
-			scanner := bufio.NewScanner(fp)
-			var count int = 0
-			for scanner.Scan() {
-				count++
-			}
-			require.Equal(t, EntryNumber, count)
-			require.NoError(t, os.Remove(fileName))
-		}
-		//time.Sleep(1 * time.Second)
-		continueCh <- struct{}{}
-	}
-	require.NoError(t, os.RemoveAll("./tmp"))
-	manager.Stop()
-	require.NoError(t, manager.AwaitComplete())
 }
+
+

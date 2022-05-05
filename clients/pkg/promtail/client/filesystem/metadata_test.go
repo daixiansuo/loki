@@ -1,10 +1,10 @@
 package filesystem
 
 import (
-	"fmt"
 	"github.com/grafana/loki/clients/pkg/promtail/api"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"testing"
 )
 
@@ -18,50 +18,66 @@ const (
 )
 
 func TestMetadata(t *testing.T) {
-	entrys := map[string]api.Entry{
-		"complete":            api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, ControllerNameLabel: FakeController, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
-		defaultNamespace:      api.Entry{Labels: model.LabelSet{ControllerNameLabel: FakeController, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
-		defaultInstanceName:   api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, ControllerNameLabel: FakeController, FileNameLabel: FakeFileName}},
-		defaultControllerName: api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
+	tests := []struct{
+		name string
+		entry api.Entry
+		expectedNamespace string
+		expectedController string
+		expectedInstance string
+		expectedFilename string
+		expectedKubernetes bool
+	}{
+		{
+			name: "full labels",
+			entry: api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, ControllerNameLabel: FakeController, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
+			expectedNamespace: FakeNamespace,
+			expectedController: FakeController,
+			expectedInstance: FakeInstance,
+			expectedFilename: FakeFileName,
+			expectedKubernetes: true,
+		},
+		{
+			name: "lack of namespace label",
+			entry: api.Entry{Labels: model.LabelSet{ControllerNameLabel: FakeController, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
+			expectedNamespace: defaultNamespace,
+			expectedController: FakeController,
+			expectedInstance: FakeInstance,
+			expectedFilename: FakeFileName,
+			expectedKubernetes: false,
+		},
+		{
+			name: "lack of instance label",
+			entry: api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, ControllerNameLabel: FakeController, FileNameLabel: FakeFileName}},
+			expectedNamespace: FakeNamespace,
+			expectedController: FakeController,
+			expectedInstance: defaultInstanceName,
+			expectedFilename: FakeFileName,
+			expectedKubernetes: true,
+		},
+		{
+			name: "lack of controller label",
+			entry: api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
+			expectedNamespace: FakeNamespace,
+			expectedController: defaultControllerName,
+			expectedInstance: FakeInstance,
+			expectedFilename: FakeFileName,
+			expectedKubernetes: false,
+		},
 	}
-	for label, e := range entrys {
-		md := Get()
-		var hashId string
-		assert.NoError(t, parseEntry(&e, md))
-		if label == defaultNamespace {
-			assert.Equal(t, md.namespace, defaultNamespace)
-			hashId = defaultNamespace + "."
-		} else {
-			assert.Equal(t, md.namespace, FakeNamespace)
-			hashId = FakeNamespace + "."
-		}
-		if label == defaultControllerName {
-			assert.Equal(t, md.controllerName, defaultControllerName)
-			hashId += defaultControllerName + "."
-		} else {
-			assert.Equal(t, md.controllerName, FakeController)
-			hashId += FakeController + "."
-		}
-		if label == defaultInstanceName {
-			assert.Equal(t, md.instance, defaultInstanceName)
-			hashId += defaultInstanceName + "."
-		} else {
-			assert.Equal(t, md.instance, FakeInstance)
-			hashId += FakeInstance + "."
-		}
-		assert.Equal(t, md.originFilename, FakeFileName)
-		assert.Equal(t, md.fileName, FakeShortFileName)
-		assert.Equal(t, md.HandlerId(), hashId+FakeFileName)
+
+	for _, tt := range tests{
+		t.Run(tt.name, func(t *testing.T) {
+			got := Get()
+			entry := tt.entry
+			require.NoError(t, parseEntry(&entry, got))
+			assert.Equal(t, tt.expectedNamespace, got.namespace)
+			assert.Equal(t, tt.expectedController, got.controllerName)
+			assert.Equal(t, tt.expectedInstance, got.instance)
+			assert.Equal(t, tt.expectedFilename, got.originFilename)
+			assert.Equal(t, tt.expectedKubernetes, got.isKubernetes)
+		})
 	}
-	md := Get()
 
-	fakeCfg := FileClientConfig{Path: "/fakepath"}
-	today := "2021-08-13"
-	exceptPath := fakeCfg.Path + "/" + FakeNamespace + "/" + FakeController + "/" + today + "/" + FakeInstance
-	entry := entrys["complete"]
-
-	assert.NoError(t, parseEntry(&entry, md))
-	assert.Equal(t, exceptPath, fmt.Sprintf(md.BasePathFmt(fakeCfg.Path), today))
 
 }
 

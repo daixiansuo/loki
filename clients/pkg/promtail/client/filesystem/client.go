@@ -32,13 +32,6 @@ func init(){
 	})
 }
 
-type hashedEntries map[string][]string
-func newHashedEntries()*hashedEntries{
-	return &hashedEntries{}
-}
-func(e *hashedEntries)add(entry api.Entry){
-}
-
 
 // client 描述客户端所需要的信息
 type client struct {
@@ -99,7 +92,7 @@ func (c *client) send(e *api.Entry) {
 	}
 	handler := c.manager.Get(md.HandlerId())
 	if handler == nil {
-		handler, err = newFileHandler(c.ctx, c.logger, md.HandlerId(), md.BasePathFmt(c.cfg.Path), md.FileName(), c.manager)
+		handler, err = newFileHandler(c.ctx, c.logger, &c.cfg, c.manager, md)
 		if err != nil {
 			level.Error(c.logger).Log("msg", "generate new handler failed", "err", err.Error())
 			return

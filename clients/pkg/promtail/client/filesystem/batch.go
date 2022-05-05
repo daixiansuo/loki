@@ -22,6 +22,7 @@ func (b *batch) size() int {
 
 func (b *batch) reSetSize(size int) *batch {
 	b.maxsize = size
+	b.streams = make([]string,0, b.maxsize)
 	return b
 }
 
@@ -48,6 +49,6 @@ func (b *batch) encode() []byte {
 }
 
 func (b *batch) clean() {
-	b.streams = []string{}
+	b.streams = b.streams[0:]
 	b.byteSize = 0
 }

@@ -46,9 +46,18 @@ type metadata struct {
 
 // BasePath is return the base path
 func (m metadata) BasePathFmt(root string) string {
-	base := root + "/" + m.namespace + "/" + DeploymentName(m.controllerName) + "/" + "%s" + "/" + m.instance
+	var base string
+	if m.isKubernetes {
+		base = root + "/" + m.namespace + "/" + DeploymentName(m.controllerName) + "/" + "%s" + "/" + m.instance
+	}else {
+		base = root + "/" + m.namespace + "/" + DeploymentName(m.controllerName) + "/"  + m.instance
+	}
 	if m.isKubernetes == false{
-		return base + "/" + path.Dir(m.originFilename)
+		tPath := path.Dir(m.originFilename)
+		if tPath != "."{
+			base = base + "/" + tPath
+		}
+		return base
 	}
 	return  base
 }

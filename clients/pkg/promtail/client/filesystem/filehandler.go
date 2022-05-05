@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
+
 	"os"
 	"path"
 	"sync"
@@ -11,17 +12,19 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
-	"github.com/pkg/errors"
 	"github.com/robfig/cron/v3"
+
+	"github.com/grafana/loki/clients/pkg/promtail/fileutil"
 )
 
 const (
-	_defaultRetryCount    = 4
-	_defaultRotateRecycle = 1 * time.Hour
-	_defaultRsyncInterval = 10 * time.Second
+	defaultFileHandlerRetry         = 4
+	defaultFileHandlerRotateRecycle = 1 * time.Hour
+	defaultFileHandlerRsyncInterval = 10 * time.Second
 
-	_ChannelRotateCh    string = "rotate"
-	_ChannelFileMissing string = "filemissing"
+	// this is used for test
+	mockRotateSignal      string = "rotate"
+	mockFileMissingSignal string = "filemissing"
 )
 
 // 文件操作句柄接口
@@ -34,26 +37,34 @@ type Handler interface {
 
 type FileHandler struct {
 	// identified a unique handler
-	handlerId string
-	pathFmt   string // root file path stored
-	fileName  string // the file name
-	logger    log.Logger
-	manager   *Manager
+	handlerId     string // 文件句柄，todo 是否需要用hash
+	directoryTpl  string //  文件目录模版，根据时间日期渲染成具体的目录
+	directoryName string
+	writeFileName string // 文件名称绝对路径
+	logger        log.Logger
+	manager       *Manager
+	cfg           *FileClientConfig
+	isKubernetes  bool
 
-	retryCount  int
-	fp          *os.File // handler
-	batchBuffer *batch
-	fsWatcher   *fsnotify.Watcher
-	receiver    chan string
+	retryCount int // 重新尝试次数, 到了一定次数还是异常，则销毁这个handler
+
+	batchBuffer  *batch
+	watcher      *fsnotify.Watcher
+	watcherEvent chan struct{}
+	receiver     chan string // entry 接收channel
 
 	handlerContext context.Context
 	handlerCancel  context.CancelFunc
 
-	wg   sync.WaitGroup
-	once sync.Once
+	wg sync.WaitGroup
 
-	fileMissingCh chan struct{}
-	rotateCh      chan struct{}
+	//fileMissingCh chan struct{}
+	rotateCh chan struct{} // rotateCh
+
+	// the followed is protected by mu
+	mu sync.Mutex
+	fp *os.File // handler
+
 }
 
 func (h *FileHandler) Receiver() chan string {
@@ -61,67 +72,85 @@ func (h *FileHandler) Receiver() chan string {
 }
 
 // newFileHandler is create an file handler instance
-func newFileHandler(parentCancel context.Context, logger log.Logger, handlerId, pathFmt, fileName string, m *Manager, opts ...string) (*FileHandler, error) {
+//func newFileHandler(parentCancel context.Context, logger log.Logger, handlerId, pathFmt, fileName string, m *Manager, isKubernetes bool, opts ...string) (*FileHandler, error) {
+func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileClientConfig, manager *Manager, mt *metadata) (*FileHandler, error) {
 	var err error
-	fd := &FileHandler{
-		handlerId:     handlerId,
-		fileName:      fileName,
-		pathFmt:       pathFmt,
-		batchBuffer:   newBatch().reSetSize(1 << 6),
-		receiver:      make(chan string),
-		logger:        log.With(logger, "handlerId", fileName),
-		manager:       m,
-		wg:            sync.WaitGroup{},
-		fileMissingCh: make(chan struct{}),
-		rotateCh:      make(chan struct{}),
-		once:          sync.Once{},
+	handler := &FileHandler{
+		handlerId:   mt.HandlerId(),
+		batchBuffer: newBatch().reSetSize(1 << 6),
+		receiver:    make(chan string),
+		manager:     manager,
+		wg:          sync.WaitGroup{},
+		//fileMissingCh: make(chan struct{}),
+		rotateCh: make(chan struct{}),
+		mu:       sync.Mutex{},
+
+		writeFileName: mt.fileName,
+		directoryTpl:  mt.BasePathFmt(cfg.Path),
+		isKubernetes:  mt.isKubernetes,
+		watcherEvent: make(chan struct{}),
 	}
-	fd.handlerContext, fd.handlerCancel = context.WithCancel(parentCancel)
-	// prepare directory that store file
-	if err = os.MkdirAll(fmt.Sprintf(fd.pathFmt, date2String(opts...)), os.ModePerm); err != nil {
-		return nil, errors.Wrap(err, "create path failed")
+	if logger!= nil{
+		handler.logger =  log.With(logger, "Component", "FileHandler")
 	}
-	// create file handler
-	if fd.fp, err = Open(path.Join(fmt.Sprintf(fd.pathFmt, date2String(opts...)), fileName)); err != nil {
+
+	handler.handlerContext, handler.handlerCancel = context.WithCancel(parentCancel)
+
+	if handler.watcher, err = fsnotify.NewWatcher(); err != nil {
 		return nil, err
 	}
 
-	if fd.fsWatcher, err = fsnotify.NewWatcher(); err != nil {
+	if err := handler.initial(); err != nil {
 		return nil, err
 	}
-	if err = fd.fsWatcher.Add(path.Join(fmt.Sprintf(fd.pathFmt, date2String(opts...)), fileName)); err != nil {
-		return nil, err
-	}
-	fd.wg.Add(3)
-	go fd.mainWorker()
-	go fd.watchDog()
-	go fd.rotateCycle()
 
-	return fd, nil
+	handler.wg.Add(3)
+	// main worker
+	go handler.run()
+	// filewatcher handler
+	go handler.fileWatcher()
+	// one cronjob, it will trigger a rotate signal at 0:0 every day
+	go handler.cronJob()
+
+	return handler, nil
 }
 
-func (h *FileHandler) mainWorker() {
-	level.Info(h.logger).Log("handerId", h.fileName, "fileHandler main worker", h.handlerId)
-	ticker := time.NewTicker(_defaultRsyncInterval)
+func (h *FileHandler) run() {
+	if h.logger != nil {
+		level.Info(h.logger).Log("HandlerId", h.handlerId, "msg", "begin to work")
+	}
+	ticker := time.NewTicker(defaultFileHandlerRsyncInterval)
+	// all handler resource should released in gc method
 	defer func() {
 		ticker.Stop()
-		close(h.receiver)
-		_ = h.flush()
+		h.Gc()
 		h.wg.Done()
-		h.Stop()
 	}()
 
 	for true {
-		select {
-		case <-h.rotateCh:
-			return
-		case <-h.fileMissingCh:
-			return
-		default:
-		}
+		// if received a stop signal ,then stop
 		select {
 		case <-h.handlerContext.Done():
 			return
+		default:
+		}
+
+		// if received a rotate signal then stop
+		select {
+		case <-h.rotateCh:
+			return
+		default:
+		}
+		// if the file is changed, then reopen it
+		select {
+		case  <-h.watcherEvent:
+			if err := h.reOpen(); err != nil {
+				return
+			}
+		default:
+		}
+		select {
+		// receive a stop signal, then returned
 		case <-ticker.C:
 			if h.batchBuffer.empty() {
 				continue
@@ -139,93 +168,162 @@ func (h *FileHandler) mainWorker() {
 			}
 		}
 	}
+
 }
 
-// flush buffer to file ,if failed and try matched the max try number, then kill this handler
-func (h *FileHandler) flush() error {
-	defer h.batchBuffer.clean()
-	if h.fp == nil {
-		return fmt.Errorf("file description is nil")
-	}
-	_, err := h.fp.Write(h.batchBuffer.encode())
-	if err == nil {
-		if err = h.fp.Sync(); err == nil {
-			return nil
+// rotate directory
+// if rotate failed , then exited ,destroy the handler
+/*
+	1. flush all data to current file
+	2. close all file description
+	3. create new directory according current date
+	4. open new file description and continue
+*/
+func (h *FileHandler) rotate(needFlush bool) error {
+	if needFlush {
+		if err := h.flush(); err != nil {
+			return err
 		}
 	}
-	level.Info(h.logger).Log(h.handlerId, "FileHandler flush buffer to disk failed, and ready retry", "err", err.Error())
-	if h.retryCount >= _defaultRetryCount {
-		level.Error(h.logger).Log(h.handlerId, "FileHandler flush buffer failed and readched the max retry number, destroy handler")
-		return err
+	h.closeFile()
+	var newDirectory string
+	if h.isKubernetes {
+		newDirectory = fmt.Sprintf(h.directoryTpl, date2String())
 	} else {
-		level.Error(h.logger).Log(h.handlerId, "FileHandler flush buffer failed  retry", "retry number", h.retryCount)
-		// try repair from failure
-		if err := h.tryRecoverFromWriteFailure(); err == nil {
-			h.retryCount = 0
-		} else {
-			h.retryCount += 1
-		}
+		newDirectory = h.directoryTpl
 	}
+
+	if err := os.MkdirAll(newDirectory, os.ModePerm); err != nil {
+		return err
+	}
+	h.directoryName = newDirectory
+	if err := h.reOpen(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-// watchDog monitor if file is delete unexpected
-// if file is deleted for some reason, watchDog will close old file handler ,then create new file handler
-func (h *FileHandler) watchDog() {
+func(h *FileHandler)fileWatcher(){
+	var(
+		event fsnotify.Event
+		ok bool
+	)
 	defer func() {
+		close(h.watcherEvent)
 		h.wg.Done()
-		close(h.fileMissingCh)
-		_ = h.fsWatcher.Close()
-		h.Stop()
 	}()
-	for true {
+	for true{
+
 		select {
-		case ev := <-h.fsWatcher.Events:
-			if ev.Op&fsnotify.Remove == fsnotify.Remove {
-				h.fileMissingCh <- struct{}{}
+		case event, ok = <-h.watcher.Events:
+			if !ok {
+				continue
 			}
-		case <-h.handlerContext.Done():
+		case <- h.handlerContext.Done():
 			return
 		}
+
+		switch  {
+		case event.Op & fsnotify.Remove == fsnotify.Remove:
+		case event.Op & fsnotify.Rename == fsnotify.Rename:
+			h.watcherEvent <- struct{}{}
+		}
 	}
 }
 
-func (h *FileHandler) tryRecoverFromWriteFailure() error {
+func (h *FileHandler) initial() error {
+	var err error = nil
+	var newDirectory string
+
+	if h.isKubernetes {
+		newDirectory = fmt.Sprintf(h.directoryTpl, date2String())
+	} else {
+		newDirectory = h.directoryTpl
+	}
+
+	if err := os.MkdirAll(newDirectory, os.ModePerm); err != nil {
+		return err
+	}
+	h.directoryName = newDirectory
+	fileName := path.Join(h.directoryName, h.writeFileName)
+	h.mu.Lock()
+	h.fp, err = fileutil.OpenFile(fileName, h.watcher)
+	h.mu.Unlock()
+	return err
+}
+
+// reOpen if file is removed then reopen the file and continue writing
+// reOpen 失败直接注销此handler
+// reOpen is goroutine safety, the caller should not add lock before call it
+func (h *FileHandler) reOpen() error {
+	fileName := path.Join(h.directoryName, h.writeFileName)
 	var err error
+	_, err = h.fp.Stat()
+	if err != nil && h.logger != nil {
+		level.Error(h.logger).Log("state old file failed", fileName, "err", err.Error())
+	}
+	h.closeFile()
+	for _i := 0; _i < h.retryCount; _i++ {
+		h.mu.Lock()
+		h.fp, err = fileutil.OpenFile(fileName, h.watcher)
+		h.mu.Unlock()
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			if h.logger != nil {
+				level.Error(h.logger).Log("OpenFile failed", fileName, "err", err.Error())
+			}
+			continue
+		}
+		_, err := h.fp.Stat()
+		if err != nil {
+			if h.logger != nil {
+				level.Error(h.logger).Log("Get state File Info", fileName, "err", err.Error())
+			}
+			continue
+		}
+
+		return nil
+	}
+	return err
+}
+
+func (h *FileHandler) closeFile() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.watcher.Remove(path.Join(h.directoryName, h.writeFileName)); err != nil && h.logger != nil {
+		level.Error(h.logger).Log("remove filewatcher", path.Join(h.directoryName, h.writeFileName), "err", err.Error())
+	}
 	if h.fp != nil {
-		_ = h.fp.Close()
+		if err := h.fp.Close(); err != nil && h.logger != nil {
+			level.Error(h.logger).Log("close file failed,", path.Join(h.directoryName, h.writeFileName), "err", err.Error())
+		}
+		h.fp = nil
 	}
-	h.fp, err = Open(h.fileName)
-	if err != nil {
-		return fmt.Errorf("create file handler failed %s, msg: %v", h.fileName, err)
-	}
-	return nil
 }
 
 // check current timestamp is current, if not then rotate file
-func (h *FileHandler) rotateCycle() {
+func (h *FileHandler) cronJob() {
+	defer func() {
+		close(h.rotateCh)
+		h.wg.Done()
+	}()
 	parser := cron.NewParser(
 		cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 	)
 	c := cron.New(cron.WithParser(parser))
 	c.AddFunc("1 1 0 * * *", func() {
-		level.Info(h.logger).Log("msg", "rotate handler", "time", date2String())
+		if h.logger != nil {
+			level.Info(h.logger).Log("msg", "rotate handler", "time", date2String())
+		}
 		h.rotateCh <- struct{}{}
 	})
 	c.Start()
 	defer func() {
-		h.wg.Done()
-		close(h.rotateCh)
 		c.Stop()
-		h.Stop()
 	}()
 	for true {
 		select {
-		//case <-ticker.C:
-		//	if minus := time.Now().Second() - h.tomorrowZeroTime().Second(); minus <= 0 {
-		//		continue
-		//	}
-		//	h.rotateCh <- struct{}{}
 		case <-h.handlerContext.Done():
 			return
 		}
@@ -234,29 +332,49 @@ func (h *FileHandler) rotateCycle() {
 
 // clean all resource for ready stop
 func (h *FileHandler) Stop() {
-	h.once.Do(func() {
-		// notify manager to register it self
-		// clean all resources
-		level.Info(h.logger).Log(h.handlerId, "begin stop handler")
-
-		h.handlerCancel() // notify all taskgoroutine to stop work
-		h.wg.Wait()       // wait all work to stop completely
-		_ = h.fp.Close()		// 关闭文件具柄
-		if h.manager != nil {
-			if err := h.manager.unRegister(h.handlerId); err != nil {
-				level.Error(h.logger).Log(h.handlerId, "[stop stage]\tunregister handler from manager failed", "err", err.Error())
-			} else {
-				level.Info(h.logger).Log(h.handlerId, "[stop stage]\tunregister handler from manager successfully")
-			}
-		}
-	})
+	h.handlerCancel()
+	h.wg.Wait()
 }
 
-// this method is used for test
-func (h *FileHandler) receiveSignal(st string) {
-	if st == _ChannelRotateCh {
-		h.rotateCh <- struct{}{}
-	} else if st == _ChannelFileMissing {
-		h.fileMissingCh <- struct{}{}
+// flush buffer to file ,if failed and try matched the max try number, then kill this handler
+// if flush failed, then reOpen the file and continue, in this case the batchBuffer will be dropped
+func (h *FileHandler) flush() error {
+	defer h.batchBuffer.clean()
+	if h.batchBuffer.size() == 0 {
+		return nil
+	}
+	if h.fp == nil {
+		return fmt.Errorf("file description is nil")
+	}
+	h.mu.Lock()
+	_, err := h.fp.Write(h.batchBuffer.encode())
+	h.mu.Unlock()
+	if err == nil {
+		if err = h.fp.Sync(); err == nil {
+			return nil
+		}
+	}
+	if h.logger != nil {
+		level.Error(h.logger).Log("Flush Buffer Failed", h.handlerId, "err", err.Error())
+	}
+	// 第一次写入失败，后面大概率基本上也是失败, 此时应该去重新reOpenfile
+	return h.reOpen()
+}
+
+// Gc is used to clean all resources
+func (h *FileHandler) Gc() {
+	if err := h.flush(); err != nil && h.logger != nil {
+		level.Error(h.logger).Log("GC Flush buffer failed", h.handlerId, "err", err.Error())
+	}
+
+	h.closeFile()
+	if h.watcher != nil {
+		h.watcher.Close()
+	}
+
+	if h.manager != nil{
+		if err := h.manager.unRegister(h.handlerId); err != nil && h.logger != nil {
+			level.Error(h.logger).Log("GC UnRegister handler", h.handlerId, "err", err.Error())
+		}
 	}
 }
