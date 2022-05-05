@@ -3,6 +3,7 @@ package filesystem
 import (
 	"context"
 	"fmt"
+	"github.com/sirupsen/logrus"
 
 	"os"
 	"path"
@@ -59,7 +60,7 @@ type FileHandler struct {
 	wg sync.WaitGroup
 
 	//fileMissingCh chan struct{}
-	rotateCh chan struct{} // rotateCh
+	rotateCh chan string // rotateCh
 
 	// the followed is protected by mu
 	mu sync.Mutex
@@ -82,7 +83,7 @@ func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileCl
 		manager:     manager,
 		wg:          sync.WaitGroup{},
 		//fileMissingCh: make(chan struct{}),
-		rotateCh: make(chan struct{}),
+		rotateCh: make(chan string),
 		mu:       sync.Mutex{},
 
 		writeFileName: mt.fileName,
@@ -94,6 +95,9 @@ func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileCl
 		handler.logger =  log.With(logger, "Component", "FileHandler")
 	}
 
+	if handler.retryCount == 0{
+		handler.retryCount = defaultFileHandlerRetry
+	}
 	handler.handlerContext, handler.handlerCancel = context.WithCancel(parentCancel)
 
 	if handler.watcher, err = fsnotify.NewWatcher(); err != nil {
@@ -137,8 +141,14 @@ func (h *FileHandler) run() {
 
 		// if received a rotate signal then stop
 		select {
-		case <-h.rotateCh:
-			return
+		case newDate := <-h.rotateCh:
+			logrus.Infof("receive rotate signal %v", newDate)
+			if h.isKubernetes {
+				// the logs shouldn't be rotated that is not from container
+				if err := h.rotate(newDate, true);err != nil{
+					return
+				}
+			}
 		default:
 		}
 		// if the file is changed, then reopen it
@@ -179,7 +189,7 @@ func (h *FileHandler) run() {
 	3. create new directory according current date
 	4. open new file description and continue
 */
-func (h *FileHandler) rotate(needFlush bool) error {
+func (h *FileHandler) rotate(newDate string, needFlush bool) error {
 	if needFlush {
 		if err := h.flush(); err != nil {
 			return err
@@ -188,7 +198,7 @@ func (h *FileHandler) rotate(needFlush bool) error {
 	h.closeFile()
 	var newDirectory string
 	if h.isKubernetes {
-		newDirectory = fmt.Sprintf(h.directoryTpl, date2String())
+		newDirectory = fmt.Sprintf(h.directoryTpl, newDate)
 	} else {
 		newDirectory = h.directoryTpl
 	}
@@ -316,7 +326,7 @@ func (h *FileHandler) cronJob() {
 		if h.logger != nil {
 			level.Info(h.logger).Log("msg", "rotate handler", "time", date2String())
 		}
-		h.rotateCh <- struct{}{}
+		h.rotateCh <- date2String()
 	})
 	c.Start()
 	defer func() {
@@ -339,7 +349,7 @@ func (h *FileHandler) Stop() {
 // flush buffer to file ,if failed and try matched the max try number, then kill this handler
 // if flush failed, then reOpen the file and continue, in this case the batchBuffer will be dropped
 func (h *FileHandler) flush() error {
-	defer h.batchBuffer.clean()
+	//defer h.batchBuffer.clean()
 	if h.batchBuffer.size() == 0 {
 		return nil
 	}
@@ -351,6 +361,7 @@ func (h *FileHandler) flush() error {
 	h.mu.Unlock()
 	if err == nil {
 		if err = h.fp.Sync(); err == nil {
+			h.batchBuffer.clean()
 			return nil
 		}
 	}
