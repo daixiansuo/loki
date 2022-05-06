@@ -49,6 +49,6 @@ func (b *batch) encode() []byte {
 }
 
 func (b *batch) clean() {
-	b.streams = b.streams[0:]
+	b.streams = b.streams[:0]
 	b.byteSize = 0
 }

@@ -66,9 +66,7 @@ func (m metadata) HandlerId() string {
 	return m.namespace + "." + m.controllerName + "." + m.instance + "." + m.originFilename
 }
 
-func (m metadata) FileName() string {
-	return m.fileName
-}
+
 
 //根据label生成元数据
 func parseEntry(entry *api.Entry, md *metadata) error {

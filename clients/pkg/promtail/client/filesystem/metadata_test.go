@@ -21,12 +21,22 @@ func TestMetadata(t *testing.T) {
 	tests := []struct{
 		name string
 		entry api.Entry
+		expectedError bool
 		expectedNamespace string
 		expectedController string
 		expectedInstance string
 		expectedFilename string
 		expectedKubernetes bool
 	}{
+		{
+			name: "nil entry",
+			expectedError: true,
+		},
+		{
+			name: "no label",
+			entry: api.Entry{},
+			expectedError: true,
+		},
 		{
 			name: "full labels",
 			entry: api.Entry{Labels: model.LabelSet{NamespaceLabel: FakeNamespace, ControllerNameLabel: FakeController, InstanceLabel: FakeInstance, FileNameLabel: FakeFileName}},
@@ -35,6 +45,7 @@ func TestMetadata(t *testing.T) {
 			expectedInstance: FakeInstance,
 			expectedFilename: FakeFileName,
 			expectedKubernetes: true,
+			expectedError: false,
 		},
 		{
 			name: "lack of namespace label",
@@ -44,6 +55,7 @@ func TestMetadata(t *testing.T) {
 			expectedInstance: FakeInstance,
 			expectedFilename: FakeFileName,
 			expectedKubernetes: false,
+			expectedError: false,
 		},
 		{
 			name: "lack of instance label",
@@ -53,6 +65,7 @@ func TestMetadata(t *testing.T) {
 			expectedInstance: defaultInstanceName,
 			expectedFilename: FakeFileName,
 			expectedKubernetes: true,
+			expectedError: false,
 		},
 		{
 			name: "lack of controller label",
@@ -62,6 +75,7 @@ func TestMetadata(t *testing.T) {
 			expectedInstance: FakeInstance,
 			expectedFilename: FakeFileName,
 			expectedKubernetes: false,
+			expectedError: false,
 		},
 	}
 
@@ -69,12 +83,18 @@ func TestMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := Get()
 			entry := tt.entry
-			require.NoError(t, parseEntry(&entry, got))
-			assert.Equal(t, tt.expectedNamespace, got.namespace)
-			assert.Equal(t, tt.expectedController, got.controllerName)
-			assert.Equal(t, tt.expectedInstance, got.instance)
-			assert.Equal(t, tt.expectedFilename, got.originFilename)
-			assert.Equal(t, tt.expectedKubernetes, got.isKubernetes)
+
+			if tt.expectedError{
+				require.Error(t, parseEntry(&entry, got))
+			}else {
+				require.NoError(t, parseEntry(&entry, got))
+				assert.Equal(t, tt.expectedNamespace, got.namespace)
+				assert.Equal(t, tt.expectedController, got.controllerName)
+				assert.Equal(t, tt.expectedInstance, got.instance)
+				assert.Equal(t, tt.expectedFilename, got.originFilename)
+				assert.Equal(t, tt.expectedKubernetes, got.isKubernetes)
+			}
+			Put(got)
 		})
 	}
 
@@ -87,6 +107,23 @@ func TestGetDeploymentName(t *testing.T) {
 	assert.Equal(t, DeploymentName(controller), except)
 }
 
-func BenchmarkMetadata(b *testing.B) {
 
+type FakeFileHandler struct {
+	//manager  *Manager
+	receiver chan string
+	count    int
+}
+func (f *FakeFileHandler) Status() bool {
+	return true
+}
+func (f *FakeFileHandler) run() {
+	for c := range f.receiver {
+		_ = c
+		f.count++
+	}
+}
+func (f *FakeFileHandler) Receiver() chan string {
+	return nil
+}
+func (f *FakeFileHandler) Stop() {
 }

@@ -3,8 +3,6 @@ package filesystem
 import (
 	"context"
 	"fmt"
-	"github.com/sirupsen/logrus"
-
 	"os"
 	"path"
 	"sync"
@@ -19,13 +17,9 @@ import (
 )
 
 const (
-	defaultFileHandlerRetry         = 4
-	defaultFileHandlerRotateRecycle = 1 * time.Hour
-	defaultFileHandlerRsyncInterval = 10 * time.Second
+	DefaultFileHandlerRetry         = 4
+	DefaultFileHandlerReSyncPeriod  = 10 * time.Second
 
-	// this is used for test
-	mockRotateSignal      string = "rotate"
-	mockFileMissingSignal string = "filemissing"
 )
 
 // 文件操作句柄接口
@@ -46,13 +40,14 @@ type FileHandler struct {
 	manager       *Manager
 	cfg           *FileClientConfig
 	isKubernetes  bool
+	reSyncPeriod  time.Duration
 
 	retryCount int // 重新尝试次数, 到了一定次数还是异常，则销毁这个handler
 
-	batchBuffer  *batch
-	watcher      *fsnotify.Watcher
-	watcherEvent chan struct{}
-	receiver     chan string // entry 接收channel
+	batchBuffer *batch
+	watcher     *fsnotify.Watcher
+
+	receiver chan string // entry 接收channel
 
 	handlerContext context.Context
 	handlerCancel  context.CancelFunc
@@ -60,7 +55,8 @@ type FileHandler struct {
 	wg sync.WaitGroup
 
 	//fileMissingCh chan struct{}
-	rotateCh chan string // rotateCh
+	rotateCh  chan string // rotateCh
+	watcherCh chan struct{}
 
 	// the followed is protected by mu
 	mu sync.Mutex
@@ -83,20 +79,28 @@ func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileCl
 		manager:     manager,
 		wg:          sync.WaitGroup{},
 		//fileMissingCh: make(chan struct{}),
-		rotateCh: make(chan string),
-		mu:       sync.Mutex{},
-
+		rotateCh:      make(chan string),
+		watcherCh:     make(chan struct{}),
+		mu:            sync.Mutex{},
 		writeFileName: mt.fileName,
 		directoryTpl:  mt.BasePathFmt(cfg.Path),
 		isKubernetes:  mt.isKubernetes,
-		watcherEvent: make(chan struct{}),
-	}
-	if logger!= nil{
-		handler.logger =  log.With(logger, "Component", "FileHandler")
 	}
 
-	if handler.retryCount == 0{
-		handler.retryCount = defaultFileHandlerRetry
+	if cfg.ReSyncPeriod < 1 {
+		handler.reSyncPeriod = DefaultFileHandlerReSyncPeriod
+	} else {
+		handler.reSyncPeriod = cfg.ReSyncPeriod
+	}
+
+	if logger != nil {
+		handler.logger = log.With(logger, "Component", "FileHandler")
+	} else {
+		handler.logger = log.NewNopLogger()
+	}
+
+	if handler.retryCount == 0 {
+		handler.retryCount = DefaultFileHandlerRetry
 	}
 	handler.handlerContext, handler.handlerCancel = context.WithCancel(parentCancel)
 
@@ -109,10 +113,10 @@ func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileCl
 	}
 
 	handler.wg.Add(3)
-	// main worker
-	go handler.run()
 	// filewatcher handler
 	go handler.fileWatcher()
+	// main worker
+	go handler.run()
 	// one cronjob, it will trigger a rotate signal at 0:0 every day
 	go handler.cronJob()
 
@@ -120,10 +124,9 @@ func newFileHandler(parentCancel context.Context, logger log.Logger, cfg *FileCl
 }
 
 func (h *FileHandler) run() {
-	if h.logger != nil {
-		level.Info(h.logger).Log("HandlerId", h.handlerId, "msg", "begin to work")
-	}
-	ticker := time.NewTicker(defaultFileHandlerRsyncInterval)
+
+	level.Info(h.logger).Log("HandlerId", h.handlerId, "msg", "begin to work")
+	ticker := time.NewTicker(h.reSyncPeriod)
 	// all handler resource should released in gc method
 	defer func() {
 		ticker.Stop()
@@ -142,23 +145,25 @@ func (h *FileHandler) run() {
 		// if received a rotate signal then stop
 		select {
 		case newDate := <-h.rotateCh:
-			logrus.Infof("receive rotate signal %v", newDate)
 			if h.isKubernetes {
 				// the logs shouldn't be rotated that is not from container
-				if err := h.rotate(newDate, true);err != nil{
+				if err := h.rotate(newDate, true); err != nil {
 					return
 				}
 			}
 		default:
 		}
-		// if the file is changed, then reopen it
+
+		//// if the file is changed, then reopen it
 		select {
-		case  <-h.watcherEvent:
+		case <-h.watcherCh:
+			h.batchBuffer.clean()
 			if err := h.reOpen(); err != nil {
 				return
 			}
 		default:
 		}
+
 		select {
 		// receive a stop signal, then returned
 		case <-ticker.C:
@@ -196,12 +201,8 @@ func (h *FileHandler) rotate(newDate string, needFlush bool) error {
 		}
 	}
 	h.closeFile()
-	var newDirectory string
-	if h.isKubernetes {
-		newDirectory = fmt.Sprintf(h.directoryTpl, newDate)
-	} else {
-		newDirectory = h.directoryTpl
-	}
+
+	newDirectory := fmt.Sprintf(h.directoryTpl, newDate)
 
 	if err := os.MkdirAll(newDirectory, os.ModePerm); err != nil {
 		return err
@@ -214,30 +215,28 @@ func (h *FileHandler) rotate(newDate string, needFlush bool) error {
 	return nil
 }
 
-func(h *FileHandler)fileWatcher(){
-	var(
+func (h *FileHandler) fileWatcher() {
+	var (
 		event fsnotify.Event
-		ok bool
+		ok    bool
 	)
 	defer func() {
-		close(h.watcherEvent)
+		close(h.watcherCh)
 		h.wg.Done()
 	}()
-	for true{
+	for true {
 
 		select {
 		case event, ok = <-h.watcher.Events:
 			if !ok {
 				continue
 			}
-		case <- h.handlerContext.Done():
+		case <-h.handlerContext.Done():
 			return
 		}
-
-		switch  {
-		case event.Op & fsnotify.Remove == fsnotify.Remove:
-		case event.Op & fsnotify.Rename == fsnotify.Rename:
-			h.watcherEvent <- struct{}{}
+		switch {
+		case event.Op&fsnotify.Remove == fsnotify.Remove:
+			h.watcherCh <- struct{}{}
 		}
 	}
 }
@@ -270,7 +269,7 @@ func (h *FileHandler) reOpen() error {
 	fileName := path.Join(h.directoryName, h.writeFileName)
 	var err error
 	_, err = h.fp.Stat()
-	if err != nil && h.logger != nil {
+	if err != nil {
 		level.Error(h.logger).Log("state old file failed", fileName, "err", err.Error())
 	}
 	h.closeFile()
@@ -278,34 +277,26 @@ func (h *FileHandler) reOpen() error {
 		h.mu.Lock()
 		h.fp, err = fileutil.OpenFile(fileName, h.watcher)
 		h.mu.Unlock()
-		if err != nil {
-			time.Sleep(1 * time.Second)
-			if h.logger != nil {
-				level.Error(h.logger).Log("OpenFile failed", fileName, "err", err.Error())
-			}
-			continue
+		if err == nil{
+			_, err = h.fp.Stat()
 		}
-		_, err := h.fp.Stat()
-		if err != nil {
-			if h.logger != nil {
-				level.Error(h.logger).Log("Get state File Info", fileName, "err", err.Error())
-			}
-			continue
+		if err == nil{
+			return nil
 		}
-
-		return nil
+		time.Sleep(1 * time.Second)
 	}
+	level.Error(h.logger).Log("reOpen file failed", h.writeFileName, "err", err.Error())
 	return err
 }
 
 func (h *FileHandler) closeFile() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if err := h.watcher.Remove(path.Join(h.directoryName, h.writeFileName)); err != nil && h.logger != nil {
+	if err := h.watcher.Remove(path.Join(h.directoryName, h.writeFileName)); err != nil {
 		level.Error(h.logger).Log("remove filewatcher", path.Join(h.directoryName, h.writeFileName), "err", err.Error())
 	}
 	if h.fp != nil {
-		if err := h.fp.Close(); err != nil && h.logger != nil {
+		if err := h.fp.Close(); err != nil {
 			level.Error(h.logger).Log("close file failed,", path.Join(h.directoryName, h.writeFileName), "err", err.Error())
 		}
 		h.fp = nil
@@ -323,9 +314,7 @@ func (h *FileHandler) cronJob() {
 	)
 	c := cron.New(cron.WithParser(parser))
 	c.AddFunc("1 1 0 * * *", func() {
-		if h.logger != nil {
-			level.Info(h.logger).Log("msg", "rotate handler", "time", date2String())
-		}
+		level.Info(h.logger).Log("msg", "rotate handler", "time", date2String())
 		h.rotateCh <- date2String()
 	})
 	c.Start()
@@ -365,16 +354,15 @@ func (h *FileHandler) flush() error {
 			return nil
 		}
 	}
-	if h.logger != nil {
-		level.Error(h.logger).Log("Flush Buffer Failed", h.handlerId, "err", err.Error())
-	}
+
+	level.Error(h.logger).Log("Flush Buffer Failed", h.handlerId, "err", err.Error())
 	// 第一次写入失败，后面大概率基本上也是失败, 此时应该去重新reOpenfile
 	return h.reOpen()
 }
 
 // Gc is used to clean all resources
 func (h *FileHandler) Gc() {
-	if err := h.flush(); err != nil && h.logger != nil {
+	if err := h.flush(); err != nil {
 		level.Error(h.logger).Log("GC Flush buffer failed", h.handlerId, "err", err.Error())
 	}
 
@@ -383,9 +371,20 @@ func (h *FileHandler) Gc() {
 		h.watcher.Close()
 	}
 
-	if h.manager != nil{
-		if err := h.manager.unRegister(h.handlerId); err != nil && h.logger != nil {
+	if h.manager != nil {
+		if err := h.manager.unRegister(h.handlerId); err != nil {
 			level.Error(h.logger).Log("GC UnRegister handler", h.handlerId, "err", err.Error())
 		}
 	}
+}
+
+
+// dateToday return an date string according
+func date2String(opts ...string) string {
+	if len(opts) > 0 {
+		return opts[0]
+	}
+	local,_ := time.LoadLocation("Asia/Shanghai")
+	year, month, day := time.Now().In(local).Date()
+	return fmt.Sprintf("%d-%d-%d", year, month, day)
 }

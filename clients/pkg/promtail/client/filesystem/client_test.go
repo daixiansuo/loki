@@ -41,7 +41,7 @@ func TestClientHandle(t *testing.T) {
 		TestLabelsKind int = 2
 	)
 	client := &client{
-		cfg:     FileClientConfig{},
+		cfg:     fakeCfg,
 		reg:     nil,
 		logger:  nil,
 		entries: nil,
@@ -81,7 +81,7 @@ func TestClientHandle(t *testing.T) {
 		require.NoError(t, fp.Close())
 	}
 
-	require.NoError(t, os.RemoveAll("./tmp"))
+	require.NoError(t, os.RemoveAll(fakeCfg.Path))
 }
 
 func _createFakeFileHandler() Handler {
