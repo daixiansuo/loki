@@ -5,6 +5,8 @@ import (
 	"github.com/grafana/loki/clients/pkg/promtail/client/loki"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/bmatcuk/doublestar"
@@ -24,6 +26,14 @@ import (
 const (
 	FilenameLabel = "filename"
 )
+
+var fileFilterHash = map[string]string{
+	"jsonApp":     "2006010215",
+	"access":      "20060102",
+	"dubboAccess": "20060102",
+	"sql":         "20060102",
+	//"DubboStack":  "20060102150405",
+}
 
 // Config describes behavior for Target
 type Config struct {
@@ -165,14 +175,14 @@ func (t *FileTarget) run() {
 			case fsnotify.Create:
 				matched, err := doublestar.Match(t.path, event.Name)
 				if err != nil {
-					level.Error(t.logger).Log("msg", "failed to match file", "error", err, "pattern",t.path, "name", event.Name)
+					level.Error(t.logger).Log("msg", "failed to match file", "error", err, "pattern", t.path, "name", event.Name)
 					continue
 				}
 				if !matched {
 					level.Debug(t.logger).Log("msg", "new file does not match glob", "filename", event.Name)
 					continue
 				}
-				t.startTailing([]string{event.Name})
+				t.startTailing(filter([]string{event.Name}))
 			default:
 				// No-op we only care about Create events
 			}
@@ -193,6 +203,8 @@ func (t *FileTarget) sync() error {
 
 	// Gets current list of files to tail.
 	matches, err := doublestar.Glob(t.path)
+	// 在此处处理过滤
+	matches = filter(matches)
 	if err != nil {
 		return errors.Wrap(err, "filetarget.sync.filepath.Glob")
 	}
@@ -379,4 +391,31 @@ func missing(as map[string]struct{}, bs map[string]struct{}) map[string]struct{}
 		}
 	}
 	return c
+}
+
+// filter 过滤日志文件
+func filter(matches []string) (files []string) {
+	compile := regexp.MustCompile("\\d+")
+	for _, file := range matches {
+		b, format := special(file)
+		if b {
+			fileDate := compile.FindStringSubmatch(file)[0]
+			currentDate := time.Now().Format(format)
+			if fileDate == currentDate {
+				files = append(files, file)
+			}
+		} else {
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+func special(file string) (bool, string) {
+	for keyword, format := range fileFilterHash {
+		if strings.Contains(file, keyword) {
+			return true, format
+		}
+	}
+	return false, ""
 }

@@ -713,3 +713,24 @@ func TestMissing(t *testing.T) {
 	}
 
 }
+
+func Test_filter(t *testing.T) {
+
+	matches := []string{"/root/logs/eye/appJson/jsonApp.2022052415.log",
+		"/root/logs/eye/access.20220602.log",
+		"/root/logs/eye/dubboAccess.20210826.log",
+		"/root/logs/eye/sql.20220524.log",
+		"/root/logs/eye/DubboStack.20210423103804.log",
+		"/root/logs/eye/app.log",
+		"/root/logs/eye/gc.log",
+		"/root/logs/eye/memory.log",
+		"/root/logs/eye/appJson/jsonApp.2022052417.log",
+		"/root/logs/eye/appJson/jsonApp.2022052415.log",
+	}
+
+	files := filter(matches)
+	fmt.Println("============================过滤结果============================")
+	for _, file := range files {
+		fmt.Println(file)
+	}
+}
